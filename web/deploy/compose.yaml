@@ -1,0 +1,45 @@
+services:
+  web:
+    image: codex-workspace-web:1.3.0
+    container_name: codex-workspace-web
+    restart: unless-stopped
+    init: true
+    env_file: /etc/codex-web/app.env
+    environment:
+      DATA_DIR: /data
+      HOST_DATA_DIR: /var/lib/codex-web
+      DOCKER_NETWORK: codex-workspace-runners
+      RUNNER_IMAGE: codex-workspace-runner:0.167.0
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: 3001
+      CREDENTIALS_KEY_FILE: /run/secrets/credentials-key
+      ADMIN_PASSWORD_FILE: /run/secrets/admin-password
+      PORT: 3000
+      NODE_ENV: production
+      MAX_CONCURRENT_RUNS: 2
+    ports:
+      - "127.0.0.1:18300:3000"
+    volumes:
+      - /var/lib/codex-web:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/codex-web/credentials-key:/run/secrets/credentials-key:ro
+      - /etc/codex-web/admin-password:/run/secrets/admin-password:ro
+    networks:
+      outbound: {}
+      runners:
+        aliases: [gateway]
+    mem_limit: 768m
+    cpus: 1.5
+    pids_limit: 256
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+networks:
+  outbound:
+    name: codex-workspace-outbound
+  runners:
+    name: codex-workspace-runners
+    internal: true

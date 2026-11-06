@@ -1,81 +1,22 @@
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# kivo
 
----
+<img src="web/public/logo.png" alt="kivo logo" width="96" />
 
-## Quickstart
+kivo 是基于 OpenAI 和 Codex 的多用户网页聊天与代码工作台。
 
-### Installing and running Codex CLI
+- **直接聊天**：注册登录后即可新建普通对话，无需先创建项目，支持多轮上下文、流式回复、停止生成和独立历史。
+- **项目工作台**：独立项目与项目会话，支持上传和编辑文件、查看代码差异、保存 Git 版本，以及隔离的 Codex 执行器。
+- **个人密钥**：每位用户填写自己的 OpenAI API Key，密钥加密保存，记录服务方实际返回的 token 用量。
+- **只读管理后台**：管理员查看用户、用量、会话及执行记录；无充值或额度分配。
 
-Run the following on Mac or Linux to install Codex CLI:
+网页源码位于 [`web/`](web/)，部署与配置见 [网页服务文档](web/README.md)。本仓库保留 [OpenAI Codex](https://github.com/openai/codex) 上游代码及提交历史；上游介绍见 [README.upstream.md](README.upstream.md)。kivo 是独立项目，并非 OpenAI 官方服务。
 
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
-```
+## 部署
 
-Run the following on Windows to install Codex CLI:
+采用 Node.js 24、React、SQLite、Docker 和 Nginx。构建和验收在部署服务器执行，配置与用户数据保存在仓库之外。详细步骤见 [web/README.md](web/README.md)。
 
-```shell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
-```
+普通聊天通过 OpenAI Responses API 工作；项目任务使用固定版本的 Codex 执行器。实际调用需要用户自己的有效 API Key、余额和模型权限。
 
-The standalone installers download from `https://releases.openai.com/codex` by default and fall back to GitHub Releases if a metadata or asset download is unavailable. To force GitHub Releases, set `CODEX_INSTALLER_USE_RELEASES_OPENAI_COM` to `false` (`0` and `no` are also accepted):
+## 许可证
 
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=false sh
-```
-
-```powershell
-$env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM='false'; irm https://chatgpt.com/codex/install.ps1 | iex
-```
-
-Codex CLI can also be installed via the following package managers:
-
-```shell
-# Install using npm
-npm install -g @openai/codex
-```
-
-```shell
-# Install using Homebrew
-brew install --cask codex
-```
-
-Then simply run `codex` to get started.
-
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
-
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
-
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
-
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
-
-</details>
-
-### Using Codex with your ChatGPT plan
-
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
-
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
-
-## Docs
-
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
-
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+保留上游 [Apache-2.0 许可证](LICENSE) 与 [NOTICE](NOTICE)。

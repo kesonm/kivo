@@ -1,0 +1,36 @@
+services:
+  openai-proxy:
+    image: node:22-bookworm-slim
+    container_name: codex-workspace-openai-proxy
+    restart: unless-stopped
+    init: true
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint: ["/usr/local/bin/codex-openai-proxy"]
+    command: ["-config", "/run/secrets/openai-proxy.json"]
+    volumes:
+      - /opt/codex-web/vendor/v2ray:/usr/local/bin/codex-openai-proxy:ro
+      - /etc/codex-web/openai-proxy.json:/run/secrets/openai-proxy.json:ro
+    networks:
+      outbound: {}
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=8m"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "const s=require('node:net').connect(18082,'127.0.0.1');s.setTimeout(2000);s.on('connect',()=>{s.destroy();process.exit(0)});s.on('error',()=>process.exit(1));s.on('timeout',()=>process.exit(1));"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "2"
+networks:
+  outbound:
+    external: true
+    name: codex-workspace-outbound

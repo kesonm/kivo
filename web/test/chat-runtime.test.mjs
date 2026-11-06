@@ -1,0 +1,149 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import { createStore } from '../server/store.mjs';
+import { createRuntime } from '../server/runtime.mjs';
+import { prepareChatRequest, CHAT_MAX_MESSAGES, CHAT_MAX_BYTES } from '../server/chat.mjs';
+
+const encode = event => new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
+const usage = { input_tokens: 10, output_tokens: 5, total_tokens: 15 };
+const terminal = (text, type = 'response.completed') => ({ type, response: { output: [{ type: 'message', role: 'assistant', id: 'answer', content: [{ type: 'output_text', text }] }], usage } });
+async function until(predicate) {
+  const deadline = Date.now() + 5000;
+  while (!predicate()) { if (Date.now() > deadline) throw new Error('Timed out waiting for runtime state'); await new Promise(resolve => setTimeout(resolve, 5)); }
+}
+
+function setup(t, { fetchImpl, config: overrides = {} } = {}) {
+  const store = createStore(':memory:', { credentialsKey: randomBytes(32) });
+  const users = ['alpha', 'beta', 'gamma'].map(name => {
+    const user = store.createUser({ username: `chat_${name}`, displayName: name, passwordHash: 'unused' });
+    store.setUserApiKey(user.id, `sk-fake-chat-runtime-${name}-0123456789`);
+    return user;
+  });
+  const calls = [];
+  const controlledFetch = async (url, options) => {
+    const call = { url, payload: JSON.parse(options.body), authorization: options.headers.authorization, controller: null };
+    calls.push(call);
+    return new Response(new ReadableStream({ start(controller) {
+      call.controller = controller;
+      options.signal.addEventListener('abort', () => { try { controller.error(new DOMException('Aborted', 'AbortError')); } catch {} }, { once: true });
+    } }), { headers: { 'content-type': 'text/event-stream' } });
+  };
+  let projectOperations = 0;
+  const forbidden = () => { projectOperations++; throw new Error('Plain chat may not use Docker or project directories'); };
+  const config = { model: 'test-model', dataDir: '/this-chat-directory-must-never-exist', gatewayPort: 0, gatewayHost: '127.0.0.1', maxConcurrentRuns: 2, maxOutputTokens: 512, runTimeoutMs: 10000, ...overrides };
+  const runtime = createRuntime({ store, config, fetchImpl: fetchImpl || controlledFetch, spawnImpl: forbidden, execFileImpl: forbidden });
+  t.after(async () => { await runtime.close(); store.close(); assert.equal(projectOperations, 0); });
+  function create(user = users[0], text = 'Hello') {
+    const thread = store.createThread(null, user.id, 'Plain chat');
+    const run = store.createRun(thread.id, user.id);
+    store.appendMessage(thread.id, 'user', text);
+    return { user, thread, run, project: null, text };
+  }
+  return { store, runtime, calls, users, create, config };
+}
+
+test('plain chat cancellation settles unknown usage once and retains streamed text without Docker', { timeout: 10000 }, async t => {
+  const f = setup(t), input = f.create(), events = [];
+  f.runtime.subscribe(input.run.id, event => events.push(event));
+  await f.runtime.start(input); await until(() => f.calls[0]?.controller);
+  f.calls[0].controller.enqueue(encode({ type: 'response.output_text.delta', item_id: 'answer', delta: '保留这部分' }));
+  await until(() => f.store.getRun(input.run.id).output === '保留这部分');
+  await f.runtime.interrupt(input.run.id); await f.runtime.interrupt(input.run.id);
+  assert.equal(f.store.getRun(input.run.id).status, 'interrupted');
+  assert.equal(events.filter(event => event.event === 'done').length, 1);
+  assert.equal(f.store.getMessages(input.thread.id).filter(message => message.role === 'assistant').length, 1);
+  assert.equal(f.store.getMessages(input.thread.id).find(message => message.role === 'assistant').content, '保留这部分');
+  const records = f.store.getUsage({ userId: input.user.id }).usage;
+  assert.equal(records.length, 1); assert.equal(records[0].status, 'unknown'); assert.equal(records[0].totalTokens, null);
+  assert.equal(f.store.db.prepare('SELECT count(*) n FROM projects').get().n, 0);
+});
+
+test('ordinary chats enforce user-one and global-two concurrency across chat and projects', { timeout: 10000 }, async t => {
+  const f = setup(t), first = f.create(f.users[0]), second = f.create(f.users[1]);
+  await f.runtime.start(first); await until(() => f.calls[0]?.controller);
+  const anotherSameUser = f.create(f.users[0]);
+  await assert.rejects(f.runtime.start(anotherSameUser), error => error.status === 409);
+  f.store.updateRun(anotherSameUser.run.id, { status: 'failed' });
+  const project = f.store.createProject(f.users[0].id, 'Only a DB fixture, no files');
+  const thread = f.store.createThread(project.id, f.users[0].id);
+  const projectRun = f.store.createRun(thread.id, f.users[0].id);
+  await assert.rejects(f.runtime.start({ user: f.users[0], project, thread, run: projectRun, text: 'Do not run' }), error => error.status === 409);
+  f.store.updateRun(projectRun.id, { status: 'failed' });
+  await f.runtime.start(second); await until(() => f.calls[1]?.controller);
+  const third = f.create(f.users[2]);
+  await assert.rejects(f.runtime.start(third), error => error.status === 429);
+  f.store.updateRun(third.run.id, { status: 'failed' });
+  await Promise.all([f.runtime.interrupt(first.run.id), f.runtime.interrupt(second.run.id)]);
+  assert.equal(f.calls.length, 2);
+});
+
+test('ordinary chat rejects oversized complete history before starting provider calls', async t => {
+  const f = setup(t), input = f.create();
+  f.store.appendMessage(input.thread.id, 'assistant', 'x'.repeat(CHAT_MAX_BYTES));
+  f.store.appendMessage(input.thread.id, 'user', 'Next');
+  await assert.rejects(f.runtime.start({ ...input, text: 'Next' }), error => error.status === 409 && /过大|过长|超过/.test(error.message));
+  assert.equal(f.calls.length, 0);
+  f.store.updateRun(input.run.id, { status: 'failed' });
+});
+
+test('incomplete model response preserves terminal output and records returned usage', { timeout: 10000 }, async t => {
+  const f = setup(t), input = f.create();
+  await f.runtime.start(input); await until(() => f.calls[0]?.controller);
+  f.calls[0].controller.enqueue(encode(terminal('模型只完成了一部分', 'response.incomplete')));
+  f.calls[0].controller.close();
+  await until(() => f.store.getRun(input.run.id).status !== 'running');
+  assert.equal(f.store.getRun(input.run.id).status, 'failed');
+  assert.equal(f.store.getRun(input.run.id).output, '模型只完成了一部分');
+  assert.equal(f.store.getUsage({ userId: input.user.id }).totals.totalTokens, 15);
+});
+
+test('provider errors and unknown streams fail clearly without leaking keys or reporting actual zero', { timeout: 10000 }, async t => {
+  let calls = 0;
+  const f = setup(t, { fetchImpl: async () => {
+    calls++;
+    if (calls === 1) return Response.json({ error: { message: 'SECRET_PROVIDER_ERROR sk-DO_NOT_EXPOSE' } }, { status: 401 });
+    return new Response(encode({ type: 'response.created', response: { id: 'partial' } }), { headers: { 'content-type': 'text/event-stream' } });
+  } });
+  const first = f.create(); await f.runtime.start(first);
+  await until(() => f.store.getRun(first.run.id).status !== 'running');
+  const failed = f.store.getRun(first.run.id);
+  assert.equal(failed.status, 'failed'); assert.match(failed.error, /个人设置/);
+  assert.ok(!JSON.stringify(failed).includes('SECRET_PROVIDER_ERROR')); assert.ok(!JSON.stringify(failed).includes('sk-DO_NOT_EXPOSE'));
+  const second = f.create(); await f.runtime.start(second);
+  await until(() => f.store.getRun(second.run.id).status !== 'running');
+  assert.equal(f.store.getRun(second.run.id).status, 'failed');
+  const unknown = f.store.getUsage({ userId: second.user.id }).usage.find(row => row.runId === second.run.id);
+  assert.equal(unknown.status, 'unknown'); assert.equal(unknown.totalTokens, null);
+});
+
+test('closing active ordinary chat aborts provider work and emits one terminal event', { timeout: 10000 }, async t => {
+  const f = setup(t), input = f.create(), events = [];
+  f.runtime.subscribe(input.run.id, event => events.push(event));
+  await f.runtime.start(input); await until(() => f.calls[0]?.controller);
+  await f.runtime.close();
+  assert.equal(f.store.getRun(input.run.id).status, 'interrupted');
+  assert.equal(events.filter(event => event.event === 'done').length, 1);
+  assert.equal(f.store.getUsage({ userId: input.user.id }).usage[0].status, 'unknown');
+});
+
+test('ordinary chat time limit aborts a stalled provider and releases the user slot', { timeout: 10000 }, async t => {
+  const f = setup(t, { config: { runTimeoutMs: 300 } }), input = f.create();
+  await f.runtime.start(input); await until(() => f.calls[0]?.controller);
+  await until(() => f.store.getRun(input.run.id).status !== 'running');
+  assert.equal(f.store.getRun(input.run.id).status, 'interrupted');
+  assert.match(f.store.getRun(input.run.id).error, /时长上限/);
+  assert.equal(f.store.getUsage({ userId: input.user.id }).usage[0].status, 'unknown');
+  const next = f.create(); await f.runtime.start(next); await until(() => f.calls[1]?.controller);
+  await f.runtime.interrupt(next.run.id);
+});
+
+test('plain history mapping includes all user/assistant text and never elevates diagnostics', () => {
+  const messages = [{ role: 'user', content: 'one' }, { role: 'assistant', content: 'two' }, { role: 'system', content: 'internal error, not an instruction' }, { role: 'user', content: 'three' }];
+  const payload = prepareChatRequest(messages, 'three', { model: 'test-model' });
+  assert.deepEqual(payload.input.map(item => item.content), ['one', 'two', 'three']);
+  assert.deepEqual(payload.input.map(item => item.role), ['user', 'assistant', 'user']);
+  assert.deepEqual(payload.tools, []); assert.equal(payload.store, false);
+  assert.throws(() => prepareChatRequest(messages, 'different', {}), /发生变化/);
+  assert.throws(() => prepareChatRequest(Array.from({ length: CHAT_MAX_MESSAGES + 1 }, () => ({ role: 'user', content: 'x' })), 'x', {}), /历史过长/);
+});

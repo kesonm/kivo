@@ -1,0 +1,7 @@
+[Unit]
+Description=Renew Codex Workspace HTTPS certificate
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/codex-web/certbot-venv/bin/certbot renew --quiet --deploy-hook "/usr/sbin/nginx -t && /usr/bin/systemctl reload nginx"
