@@ -66,6 +66,10 @@ sudo cat /etc/codex-web/admin-password
 
 ## 运行和更新（仅服务器）
 
+首次部署时，将本仓库 `web/` 内容放入服务器 `/opt/codex-web/current`，准备 Docker、Compose、Nginx 和 HTTPS 证书。创建 `/var/lib/codex-web` 与仅 root 可读的 `/etc/codex-web`，复制 `deploy/app.env.example` 到 `/etc/codex-web/app.env`，设置自己的 HTTPS 地址和可访问的模型。首次生成 `/etc/codex-web/credentials-key`（32 字节随机原始数据）与 `/etc/codex-web/admin-password`（至少 12 位随机密码），权限均设为 `600`；已有部署绝对不要重新生成这些文件。
+
+先构建项目执行器：`sudo docker build --network host -f deploy/Dockerfile.runner -t codex-workspace-runner:0.167.0 .`。按下面步骤构建并启动网页，安装已替换域名和证书路径的 Nginx 模板。能直接访问 OpenAI 的服务器无需启动 `openai-proxy`；该可选服务需要另行准备个人出网配置和程序，公开仓库不附带代理凭据。仓库中继承的上游发布工作流在新 kivo 仓库默认禁用，避免运行仅适用于 OpenAI 上游的发布流程。
+
 按要求，不在本地启动、构建或测试应用。服务器执行：
 
 ```sh
@@ -121,6 +125,14 @@ NO_PROXY=localhost,127.0.0.1,::1,gateway
 - 文件编辑每文件最多 1 MB，项目文件 API 总量最多 100 MB。私有 Git 凭据和 push/pull 尚未提供。
 - 不支持 OpenAI 托管收费工具、任意上游转发、跨用户供应商会话引用。
 - 真实 OpenAI 推理需要用户自行配置有效 Key、余额及模型权限；模拟接口测试不代表真实付费调用已通过。
+
+## 普通聊天与 kivo 品牌验收（2026-11-06，v1.3.0）
+
+- 最终 TypeScript/Vite 构建与全部 62 项自动化测试在服务器通过，包括真实 HTTP → runtime → gateway 的模拟流式多轮集成、用户密钥隔离、并发限制、停止/超时及未知用量。
+- 浏览器实际验证了零项目直接聊天、多轮上下文、刷新后恢复历史、停止后保留部分回复、生成中切换新对话互不串话，以及返回后台已完成会话时刷新用量。
+- 1440px 桌面与 390px 手机界面检查通过，无横向溢出。网站名称为 `kivo`，保留用户提供的 Logo。
+- 正式 HTTPS 站点检查了管理员登录、默认普通聊天入口、原有项目文件与代码差异入口。验收没有使用用户的真实 Key 进行付费调用。
+- 对最新一致数据库副本完成迁移验证：所有表的数据指纹完全一致，外键完整；原有用户、个人密钥、项目及对话均保留。备份：`/opt/codex-web/backups/direct-chat-1.3.0-20261106T094047Z`。
 
 ## 界面升级验收（2026-11-06，v1.2.0）
 

@@ -92,8 +92,9 @@ export function App() {
     };
   }, [sidebarOpen, user?.id]);
 
-  const refreshSession = useCallback(async () => {
+  const refreshSession = useCallback(async (expectedUserId?: string) => {
     const result = await api<Session>('/api/session');
+    if (expectedUserId && activeLocation.current.userId !== expectedUserId) return;
     setSession(result);
   }, []);
   const initialize = useCallback(async () => {
@@ -144,11 +145,12 @@ export function App() {
     const path = getDirtyFile();
     return !path || !!await ask({ title: '离开未保存的文件？', description: `${path} 的修改尚未保存。离开后这些编辑内容将丢失。`, confirm: '放弃修改并继续', danger: true });
   }
-  async function navigate(next: View) { if (next !== view && !(await confirmNavigation())) return; ++navigationRevision.current; setView(next); setSidebarOpen(false); }
+  async function navigate(next: View) { if (next !== view && !(await confirmNavigation())) return; ++navigationRevision.current; setView(next); setSidebarOpen(false); if (user) void refreshSession(user.id).catch(() => undefined); }
   function openConversation(nextProjectId: string | null, nextThreadId: string | null) {
     ++navigationRevision.current;
     if (nextProjectId !== projectId) setThreads([]);
     setProjectId(nextProjectId); setThreadId(nextThreadId); setWorkspaceVersion(version => version + 1); setView('workspace'); setSidebarOpen(false);
+    if (user) void refreshSession(user.id).catch(() => undefined);
   }
   async function selectProject(id: string) { if (!(await confirmNavigation())) return; openConversation(id, null); }
   async function selectThread(thread: Thread) {

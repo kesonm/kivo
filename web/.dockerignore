@@ -2,6 +2,7 @@ node_modules
 dist
 data
 .env*
+!deploy/app.env.example
 test-results
 *.log
 backups
