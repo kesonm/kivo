@@ -1,5 +1,6 @@
 const PUBLIC_ORIGIN = 'https://kivo.iptnet.xyz';
 const BACKEND_ORIGIN = 'https://origin-kivo.iptnet.xyz';
+const CHAT_UPLOAD_BYTES = 8 * 1024 * 1024 + 64 * 1024;
 
 // Asset-first requests receive the same policy from public/_headers.
 export const SECURITY_HEADERS = {
@@ -54,6 +55,37 @@ function clientIp(request) {
   return null;
 }
 
+async function readChatUpload(request) {
+  const length = Number(request.headers.get('content-length'));
+  if (length > CHAT_UPLOAD_BYTES) return null;
+  const reader = request.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > CHAT_UPLOAD_BYTES) {
+        void reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  // A fixed-length upload keeps the Worker-to-Tunnel hop from stalling on
+  // chunked multipart requests. All other API bodies continue to stream.
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
 export async function handleRequest(request, env, fetchImpl = fetch) {
   const url = new URL(request.url);
   if (url.origin !== PUBLIC_ORIGIN) return failure(421, '此入口仅支持 kivo.iptnet.xyz。');
@@ -99,9 +131,15 @@ export async function handleRequest(request, env, fetchImpl = fetch) {
   headers.set('CF-Connecting-IP', ip);
   headers.set('Cache-Control', 'no-store');
   try {
+    let body = request.body;
+    if (body && request.method === 'POST' && /^\/api\/threads\/[a-f0-9-]{36}\/turns$/.test(url.pathname)
+      && /^multipart\/form-data(?:\s*;|$)/i.test(request.headers.get('content-type') ?? '')) {
+      body = await readChatUpload(request);
+      if (body === null) return failure(413, '附件合计不能超过 8 MiB。');
+    }
     const upstream = await fetchImpl(target.href, {
       method: request.method, headers,
-      ...(request.body === null ? {} : { body: request.body, duplex: 'half' }),
+      ...(body === null ? {} : { body, duplex: 'half' }),
       signal: request.signal,
       redirect: 'manual', cache: 'no-store',
     });

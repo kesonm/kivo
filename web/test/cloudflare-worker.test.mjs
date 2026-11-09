@@ -84,6 +84,34 @@ test('trusted client IP is mandatory and accepts IPv4 and IPv6 without trusting 
   assert.deepEqual(captured, ['203.0.113.9', '2001:db8::9', '::ffff:192.0.2.1']);
 });
 
+test('large chat multipart forwards as fixed-length bytes and rejects oversized bodies', async () => {
+  const pathname = '/api/threads/00000000-0000-0000-0000-000000000000/turns';
+  const form = new FormData();
+  form.set('tool', 'analyze');
+  form.set('files', new Blob([new Uint8Array(2_621_440)], { type: 'text/plain' }), 'probe.txt');
+  let calls = 0;
+  const fetcher = async (_url, options) => {
+    calls++;
+    assert.ok(options.body instanceof Uint8Array);
+    const forwarded = await new Response(options.body, { headers: options.headers }).formData();
+    assert.equal(forwarded.get('files').size, 2_621_440);
+    assert.equal(forwarded.get('tool'), 'analyze');
+    return Response.json({ ok: true });
+  };
+  assert.equal((await handleRequest(request(pathname, { method: 'POST', body: form }), environment(), fetcher)).status, 200);
+  const large = new ReadableStream({
+    start(controller) {
+      const chunk = new Uint8Array(5 * 1024 * 1024);
+      controller.enqueue(chunk);
+      controller.enqueue(chunk);
+      controller.close();
+    },
+  });
+  const oversized = request(pathname, { method: 'POST', body: large, duplex: 'half', headers: { 'content-type': 'multipart/form-data; boundary=test' } });
+  assert.equal((await handleRequest(oversized, environment(), fetcher)).status, 413);
+  assert.equal(calls, 1);
+});
+
 test('SSE response stays streaming, uncached and cancellable, with separate session cookies intact', async () => {
   let cancelled = false;
   const stream = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: {}\n\n')); }, cancel() { cancelled = true; } });
