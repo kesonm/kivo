@@ -6,9 +6,9 @@
 
 - 仓库：`kesonm/kivo`，生产分支 `main`。
 - 根目录：`web`。
-- 构建命令：`npm run build`。
+- 构建命令：`npm ci --include=dev && npm run build`。
 - 部署命令：`npm run deploy:cloudflare`，固定 Wrangler 4.158.0。
-- 构建环境变量：`NODE_VERSION=24.22.2`。
+- 构建环境变量：`NODE_VERSION=24.22.2`、`SKIP_DEPENDENCY_INSTALL=1`。跳过仓库根目录 pnpm workspace 的自动安装，使用 `web/package-lock.json` 单独安装网页版依赖。
 - 关闭 Preview builds；Wrangler 也关闭 `workers.dev` 与预览 URL。
 - 运行时 Secret：`ORIGIN_TOKEN`，必须与服务器 `/etc/codex-web/cloudflare-origin-token` 一致。不要放进 Git、公开变量、构建日志或客户端。
 
