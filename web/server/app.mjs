@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createStore, AppError } from './store.mjs';
 import { createProjects } from './projects.mjs';
 import { loadCredentialsKey } from './credentials.mjs';
+import { createLocalBridge, localPath } from './local.mjs';
 
 const scrypt=promisify(scryptCallback);
 const cookieName='cw_session';
@@ -52,7 +53,7 @@ export async function bootstrapAdmin(store,config){
   store.createUser({username:validUsername(config.adminUsername??'admin'),displayName:'管理员',passwordHash:await hashPassword(password),role:'admin'});
 }
 
-export function createApp({store,runtime,config,projects:createProjectsOverride}){
+export function createApp({store,runtime,config,local=null,projects:createProjectsOverride}){
   const app=express();const projects=createProjectsOverride??createProjects(config);const limits=new Map();const loginFailures=new Map();
   const dummyHash='scrypt$16384$8$1$00000000000000000000000000000000$'+'00'.repeat(64);
   app.disable('x-powered-by');app.set('trust proxy',config.trustProxy??false);
@@ -63,7 +64,17 @@ export function createApp({store,runtime,config,projects:createProjectsOverride}
     if(config.cookieSecure)res.set('Strict-Transport-Security','max-age=31536000');
     if(req.path.startsWith('/api/'))res.set('Cache-Control','no-store');next();
   });
+  if(local)app.post('/api/local-agent/responses',(req,res)=>runtime.localResponses(req,res));
   app.use(express.json({limit:'1100kb',strict:true}));
+  if(local){
+    app.use('/api/local-agent',(req,res,next)=>{if(req.get('origin')||req.get('cookie'))throw new AppError('本地助手接口不接受浏览器会话',403);next();});
+    app.post('/api/local-agent/pair',(req,res)=>{rate(req,'local-pair',10,600_000);res.json(local.beginPair(req.body));});
+    app.post('/api/local-agent/claim',(req,res)=>{rate(req,'local-claim',240,600_000);res.json(local.claimPair(req.body.token));});
+    app.get('/api/local-agent/poll',async(req,res)=>{const device=local.authenticate(req),controller=new AbortController();res.on('close',()=>controller.abort());res.json(await local.poll(device,controller.signal));});
+    app.post('/api/local-agent/result',(req,res)=>{local.result(local.authenticate(req),req.body);res.json({ok:true});});
+    app.post('/api/local-agent/events',(req,res)=>{local.events(local.authenticate(req),req.body);res.json({ok:true});});
+    app.use('/api/local-agent',(req,res)=>res.status(404).json({error:'接口不存在'}));
+  }
   app.use('/api',(req,res,next)=>{
     const token=parseCookies(req)[cookieName],session=store.getSession(token);req.sessionToken=token;req.session=session;
     req.user=session?.userId?store.getUser(session.userId):null;
@@ -166,6 +177,13 @@ export function createApp({store,runtime,config,projects:createProjectsOverride}
   });
   app.get('/api/account/usage',auth,(req,res)=>{checkedQuery(req,['limit','offset']);res.json(store.getUsage({userId:req.user.id,...page(req)}));});
   app.get('/api/projects',auth,(req,res)=>res.json({projects:store.listProjects(req.user.id)}));
+  if(local){
+    app.get('/api/local-devices',auth,(req,res)=>res.json({devices:local.list(req.user.id)}));
+    app.post('/api/local-devices/pair',auth,(req,res)=>{rate(req,'local-pair-approve',10,600_000);res.json({device:local.approvePair(req.user,req.body.code)});});
+    app.delete('/api/local-devices/:id',auth,async(req,res)=>{await local.revoke(req.user.id,req.params.id);res.json({ok:true});});
+    app.get('/api/local-devices/:id/folders',auth,async(req,res)=>res.json(await local.call(req.user.id,req.params.id,'browse',{path:localPath(req.query.path??'')})));
+    app.post('/api/local-projects',auth,async(req,res)=>{rate(req,'local-project',20,60_000);res.status(201).json({project:await local.addProject(req.user.id,req.body.deviceId,req.body.path,req.body.name,req.body.create===true)});});
+  }
   app.post('/api/projects',auth,async(req,res)=>{
     rate(req,'create-project',20,60*60_000);const name=requiredText(req.body.name,'项目名称',80);
     const project=store.createProject(req.user.id,name);
@@ -175,13 +193,13 @@ export function createApp({store,runtime,config,projects:createProjectsOverride}
     store.audit(req.user.id,'project.created',project.id,name);res.status(201).json({project});
   });
   app.patch('/api/projects/:id',auth,(req,res)=>{const p=ownedProject(req);res.json({project:store.updateProject(p.id,requiredText(req.body.name,'项目名称',80))});});
-  app.delete('/api/projects/:id',auth,async(req,res)=>{const p=ownedProject(req);await projects.withLock(p.id,async()=>{idle(p.id);await projects.remove(p.id);store.deleteProject(p.id);store.audit(req.user.id,'project.deleted',p.id,p.name);res.json({ok:true});});});
-  app.get('/api/projects/:id/tree',auth,fileAction(p=>projects.tree(p.id)));
-  app.get('/api/projects/:id/file',auth,fileAction((p,req)=>projects.readFile(p.id,req.query.path)));
-  app.put('/api/projects/:id/file',auth,fileAction((p,req)=>projects.writeFile(p.id,req.body.path,req.body.content)));
-  app.delete('/api/projects/:id/file',auth,fileAction((p,req)=>projects.deleteFile(p.id,req.body.path)));
-  app.get('/api/projects/:id/diff',auth,fileAction(p=>projects.diff(p.id)));
-  app.post('/api/projects/:id/commit',auth,fileAction((p,req)=>projects.commit(p.id,requiredText(req.body.message??'Save workspace changes','提交说明',200))));
+  app.delete('/api/projects/:id',auth,async(req,res)=>{const p=ownedProject(req);await projects.withLock(p.id,async()=>{idle(p.id);if(p.location!=='local')await projects.remove(p.id);store.deleteProject(p.id);store.audit(req.user.id,'project.deleted',p.id,p.name);res.json({ok:true});});});
+  app.get('/api/projects/:id/tree',auth,fileAction(p=>p.location==='local'?local.projectCall(p,'tree'):projects.tree(p.id)));
+  app.get('/api/projects/:id/file',auth,fileAction((p,req)=>p.location==='local'?local.projectCall(p,'read',{path:req.query.path}):projects.readFile(p.id,req.query.path)));
+  app.put('/api/projects/:id/file',auth,fileAction((p,req)=>p.location==='local'?local.projectCall(p,'write',{path:req.body.path,content:req.body.content}):projects.writeFile(p.id,req.body.path,req.body.content)));
+  app.delete('/api/projects/:id/file',auth,fileAction((p,req)=>p.location==='local'?local.projectCall(p,'delete',{path:req.body.path}):projects.deleteFile(p.id,req.body.path)));
+  app.get('/api/projects/:id/diff',auth,fileAction(p=>p.location==='local'?local.projectCall(p,'diff'):projects.diff(p.id)));
+  app.post('/api/projects/:id/commit',auth,fileAction((p,req)=>p.location==='local'?local.projectCall(p,'commit'):projects.commit(p.id,requiredText(req.body.message??'Save workspace changes','提交说明',200))));
   app.get('/api/projects/:id/threads',auth,(req,res)=>{const p=ownedProject(req);res.json({threads:store.listThreads(p.id)});});
   app.post('/api/projects/:id/threads',auth,(req,res)=>{const p=ownedProject(req);res.status(201).json({thread:store.createThread(p.id,req.user.id,requiredText(req.body.title??'新对话','对话标题',100))});});
   app.get('/api/threads',auth,(req,res)=>{checkedQuery(req,[]);res.json({threads:store.listStandaloneThreads(req.user.id)});});
@@ -209,6 +227,8 @@ export function createApp({store,runtime,config,projects:createProjectsOverride}
     if(project)await projects.withLock(project.id,start);else await start();
   });
   app.post('/api/runs/:id/interrupt',auth,async(req,res)=>{const run=ownedRun(req);await runtime.interrupt(run.id);res.json({ok:true});});
+  app.get('/api/runs/:id/approvals',auth,(req,res)=>{const run=ownedRun(req);res.json({approvals:runtime.approvals?.(run.id)??[]});});
+  app.post('/api/runs/:id/approvals/:approvalId',auth,async(req,res)=>{const run=ownedRun(req);await runtime.approve(run.id,req.params.approvalId,req.body.decision);res.json({ok:true});});
   app.get('/api/runs/:id/events',auth,(req,res)=>{
     const run=ownedRun(req);res.status(200).set({'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform','Connection':'keep-alive','X-Accel-Buffering':'no'});res.flushHeaders();
     const send=(event,data)=>{if(!res.destroyed)res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);};
@@ -261,7 +281,7 @@ export async function startServer(config=loadConfig()){
   credentialsKey.fill(0);
   await bootstrapAdmin(store,config);store.reconcileInterruptedRuns();
   const {createRuntime}=await import('./runtime.mjs');
-  const runtime=await createRuntime({store,config}),app=createApp({store,runtime,config});
+  const local=createLocalBridge({store,config}),runtime=await createRuntime({store,config,local}),app=createApp({store,runtime,config,local});
   const server=app.listen(config.port,config.host,()=>console.log(JSON.stringify({event:'listening',port:config.port,model:config.model,userProvidedKeys:true})));
   server.requestTimeout=120000;server.headersTimeout=15000;
   let closing=false;

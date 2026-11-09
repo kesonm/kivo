@@ -11,6 +11,16 @@ const request = (pathname, options = {}) => new Request(publicOrigin + pathname,
   ...options, headers: { 'cf-connecting-ip': '198.51.100.7', ...options.headers },
 });
 
+test('local assistant capability passes only through its dedicated API prefix', async () => {
+  for (const pathname of ['/api/local-agent/poll', '/api/local-agent/responses', '/api/local-devices', '/api/projects']) {
+    const response = await handleRequest(request(pathname, { headers: { authorization: 'Bearer fake-local-capability' } }), environment(), async (_url, options) => {
+      assert.equal(options.headers.get('authorization'), pathname.startsWith('/api/local-agent/') ? 'Bearer fake-local-capability' : null);
+      return Response.json({ ok: true });
+    });
+    assert.equal(response.status, 200);
+  }
+});
+
 test('Cloudflare entry rejects alternate hosts, protocols and cross-origin requests without fetching', async () => {
   let calls = 0;
   const fetcher = async () => { calls++; return Response.json({ ok: true }); };

@@ -4,12 +4,13 @@ import { Auth } from './Auth';
 import { Account } from './Account';
 import { Admin } from './Admin';
 import { Workspace } from './Workspace';
+import { LocalDevices, LocalProjectDialog } from './Local';
 import { Brand, Icon, Logo } from './icons';
 import { getDirtyFile } from './navigation';
 import { ErrorBox, Loading, useDialog, useNotice } from './ui';
 import type { Project, Session, Thread, User } from './types';
 
-type View = 'workspace' | 'account' | 'admin';
+type View = 'workspace' | 'account' | 'admin' | 'local';
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [initializing, setInitializing] = useState(true);
@@ -34,6 +35,7 @@ export function App() {
   const [workspaceVersion, setWorkspaceVersion] = useState(0);
   const [projectSearch, setProjectSearch] = useState('');
   const [creating, setCreating] = useState(false);
+  const [localDialog, setLocalDialog] = useState<'create' | 'open' | null>(null);
   const projectRequest = useRef(0);
   const navigationRevision = useRef(0);
   const ask = useDialog(); const notify = useNotice();
@@ -168,6 +170,10 @@ export function App() {
   }
   async function createProject() {
     if (!(await confirmNavigation())) return;
+    setLocalDialog('create');
+  }
+  async function createCloudProject() {
+    if (!(await confirmNavigation())) return;
     const values = await ask({ title: '创建新项目', description: '每个项目都有独立的文件空间和对话历史。', fields: [{ name: 'name', label: '项目名称', placeholder: '例如：我的个人网站', maxLength: 80 }], confirm: '创建项目' });
     if (!values) return;
     const requestUser = user?.id; const location = navigationRevision.current;
@@ -185,7 +191,7 @@ export function App() {
   }
   async function deleteProject() {
     if (!selectedProject) return;
-    const values = await ask({ title: '永久删除项目？', description: `「${selectedProject.name}」的文件和对话历史将被删除。此操作无法撤销，请输入项目名称确认。`, fields: [{ name: 'name', label: '输入项目名称', placeholder: selectedProject.name }], confirm: '删除项目', danger: true });
+    const values = await ask({ title: selectedProject.location === 'local' ? '移除本地项目关联？' : '永久删除项目？', description: selectedProject.location === 'local' ? `「${selectedProject.name}」的网页会话记录将被删除，电脑上的文件和检查点会保留。请输入项目名称确认。` : `「${selectedProject.name}」的文件和对话历史将被删除。此操作无法撤销，请输入项目名称确认。`, fields: [{ name: 'name', label: '输入项目名称', placeholder: selectedProject.name }], confirm: '删除项目', danger: true });
     if (!values) return;
     if (values.name !== selectedProject.name) { notify('项目名称不匹配，未执行删除。', 'error'); return; }
     try { await api(`/api/projects/${enc(selectedProject.id)}`, { method: 'DELETE' }); if (activeLocation.current.projectId === selectedProject.id) openConversation(null, null); await loadProjects(); notify('项目已删除'); }
@@ -230,7 +236,7 @@ export function App() {
         <div className="sidebar-projects">
         <div className="sidebar-section-label"><span>项目空间</span><span>{projects.length}</span></div>
         <div className="sidebar-search"><Icon name="search" size={17} /><input value={projectSearch} onChange={event => setProjectSearch(event.target.value)} aria-label="搜索项目" placeholder="搜索项目" /></div>
-        {projectsLoading ? <div className="sidebar-loading"><span className="spinner" />加载项目…</div> : projectsError ? <div className="sidebar-error"><p>{projectsError}</p><button onClick={() => void loadProjects()}>重试</button></div> : projects.filter(project => project.name.toLowerCase().includes(projectSearch.toLowerCase())).map(project => <button key={project.id} className={'sidebar-project' + (view === 'workspace' && projectId === project.id ? ' selected' : '')} onClick={() => void selectProject(project.id)}><Icon name="folder" size={17} /><span>{project.name}</span>{projectId === project.id && <span className="project-selected-dot" />}</button>)}
+        {projectsLoading ? <div className="sidebar-loading"><span className="spinner" />加载项目…</div> : projectsError ? <div className="sidebar-error"><p>{projectsError}</p><button onClick={() => void loadProjects()}>重试</button></div> : projects.filter(project => project.name.toLowerCase().includes(projectSearch.toLowerCase())).map(project => <button key={project.id} className={'sidebar-project' + (view === 'workspace' && projectId === project.id ? ' selected' : '')} onClick={() => void selectProject(project.id)}><Icon name={project.location === "local" ? "terminal" : "folder"} size={17} /><span>{project.name}{project.location === "local" && <small className="caption"> · 本地</small>}</span>{projectId === project.id && <span className="project-selected-dot" />}</button>)}
         {!projectsLoading && projects.length === 0 && <p className="sidebar-empty">需要操作文件和修改代码时，可以创建项目。</p>}
         {projectSearch && projects.length > 0 && !projects.some(project => project.name.toLowerCase().includes(projectSearch.toLowerCase())) && <p className="sidebar-empty">没有匹配的项目。</p>}
         {selectedProject && <div className="sidebar-conversations">
@@ -245,6 +251,7 @@ export function App() {
         <button className="sidebar-usage" onClick={() => void navigate('account')} title={'本站已知用量 ' + number(user.usedTokens) + ' tokens'}><div><Icon name="activity" size={16} /><span>本站用量</span><strong>{compact(user.usedTokens)}</strong></div><span><span>API Key · {user.apiKeyConfigured ? '已配置' : '未配置'}</span><Icon name="chevron" size={13} /></span></button>
         <nav className="sidebar-nav">
           <button className={view === 'account' ? 'selected' : ''} onClick={() => void navigate('account')}><Icon name="settings" size={18} />账户设置</button>
+          <button className={view === 'local' ? 'selected' : ''} onClick={() => void navigate('local')}><Icon name="terminal" size={18} />本地助手</button>
           {user.role === 'admin' && <button className={view === 'admin' ? 'selected' : ''} onClick={() => void navigate('admin')}><Icon name="shield" size={18} />管理后台</button>}
         </nav>
         <div className="sidebar-profile"><div className="sidebar-avatar">{(user.displayName || user.username).slice(0, 1).toUpperCase()}</div><div><strong>{user.displayName || user.username}</strong><span>{user.role === 'admin' ? '管理员' : '成员'}</span></div><button className="icon-button" title="退出登录" aria-label="退出登录" onClick={() => void logout()}><Icon name="logout" size={17} /></button></div>
@@ -252,7 +259,8 @@ export function App() {
     </aside>
     <div className="main-shell">
       <header className="mobile-topbar"><button ref={sidebarOpenButton} className="icon-button" aria-label="打开导航" aria-expanded={sidebarOpen} aria-controls="primary-navigation" onClick={() => setSidebarOpen(true)}><Icon name="menu" /></button><Brand small /><button className="icon-button" aria-label="账户设置" onClick={() => void navigate('account')}><Icon name="user" /></button></header>
-      {view === 'workspace' ? <Workspace key={(projectId || 'chat') + ':' + workspaceVersion} project={selectedProject} threadId={threadId} onThreadCreated={onThreadCreated} onThreadsChanged={onThreadsChanged} user={user} providerConfigured={!!session?.providerConfigured} model={session?.model} refreshSession={refreshSession} onRenameProject={() => void renameProject()} onDeleteProject={() => void deleteProject()} onOpenAccount={() => void navigate('account')} /> : view === 'admin' && user.role === 'admin' ? <Admin currentUser={user} /> : <Account user={user} refreshSession={refreshSession} />}
+      {view === 'workspace' ? <Workspace key={(projectId || 'chat') + ':' + workspaceVersion} project={selectedProject} threadId={threadId} onThreadCreated={onThreadCreated} onThreadsChanged={onThreadsChanged} user={user} providerConfigured={!!session?.providerConfigured} model={session?.model} refreshSession={refreshSession} onRenameProject={() => void renameProject()} onDeleteProject={() => void deleteProject()} onOpenAccount={() => void navigate('account')} onOpenLocal={async () => { if (await confirmNavigation()) setLocalDialog('open'); }} /> : view === 'local' ? <LocalDevices /> : view === 'admin' && user.role === 'admin' ? <Admin currentUser={user} /> : <Account user={user} refreshSession={refreshSession} />}
     </div>
+    {localDialog && <LocalProjectDialog mode={localDialog} onClose={() => setLocalDialog(null)} onCloud={() => { setLocalDialog(null); void createCloudProject(); }} onSetup={() => { setLocalDialog(null); void navigate('local'); }} onProject={project => { if (activeLocation.current.userId !== user.id) return; setLocalDialog(null); setProjects(old => [project, ...old.filter(p => p.id !== project.id)]); openConversation(project.id, null); }} />}
   </div>;
 }

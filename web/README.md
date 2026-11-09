@@ -2,7 +2,13 @@
 
 Cloudflare 免费 Worker + 现有 Ubuntu 完整功能部署见 [Cloudflare 部署说明](cloudflare/README.md)。新域名配置为 `https://kivo.iptnet.xyz`，数据库、个人 Key 和 Codex 项目执行器保留在原服务器。
 
-基于 OpenAI Responses API 与官方 Codex app-server 的多用户浏览器工作台。部署地址：<https://124.220.52.44>。官方仓库源码保留在上级目录，网页服务位于 `web/`，执行器固定使用 `@openai/codex@0.167.0`。
+基于 OpenAI Responses API 与官方 Codex app-server 的多用户浏览器工作台。部署地址：<https://kivo.iptnet.xyz>。官方仓库源码保留在上级目录，网页服务位于 `web/`，执行器固定使用 `@openai/codex@0.167.0`。
+
+## 本地助手（1.4.0）
+
+侧栏“本地助手”提供安装、设备配对和撤销授权。“创建项目”可在已配对电脑的授权父目录中创建文件夹或打开现有项目；普通聊天输入框的文件夹按钮也可以打开本地项目。云端项目继续可用。
+
+本地文件操作、代码差异和 Codex 命令在用户电脑上执行，额外命令或文件权限在网页逐次审批。文件检查点不修改 Git 历史，移除网页项目不会删除本机目录。助手通过 HTTPS 主动连接网站，不需要开放本机端口；模型上下文、对话和执行日志仍经过 kivo 服务器，使用本人已配置的 API Key 记录实际用量。安装、权限边界及验收说明见 [本地助手部署说明](deploy/LOCAL_ASSISTANT.md)。
 
 ## 普通聊天与项目（1.3.0）
 
@@ -80,11 +86,11 @@ cd /opt/codex-web/current
 sudo install -m 755 /usr/bin/docker deploy/docker-cli
 sudo docker build --network host --pull=false \
   --build-arg DEBIAN_MIRROR=http://mirrors.tencentyun.com \
-  -f deploy/Dockerfile --target build -t codex-workspace-build:1.3.0 .
-sudo docker run --rm --network none codex-workspace-build:1.3.0 npm test
+  -f deploy/Dockerfile --target build -t codex-workspace-build:1.4.0 .
+sudo docker run --rm --network none codex-workspace-build:1.4.0 npm test
 sudo docker build --network host --pull=false \
   --build-arg DEBIAN_MIRROR=http://mirrors.tencentyun.com \
-  -f deploy/Dockerfile -t codex-workspace-web:1.3.0 .
+  -f deploy/Dockerfile -t codex-workspace-web:1.4.0 .
 sudo docker compose -f deploy/compose.proxy.yaml up -d openai-proxy
 sudo docker compose -f deploy/compose.yaml up -d --force-recreate web
 ```

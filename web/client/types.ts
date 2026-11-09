@@ -2,7 +2,7 @@ export interface User {
   id: string; username: string; displayName: string; role: 'admin' | 'user';
   disabled: boolean; usedTokens: number; apiKeyConfigured: boolean; keyLast4?: string | null; createdAt: string;
 }
-export interface Project { id: string; name: string; createdAt: string; updatedAt: string }
+export interface Project { id: string; name: string; createdAt: string; updatedAt: string; location?: 'local' | 'cloud'; deviceId?: string; localPath?: string }
 export interface Thread { id: string; projectId: string | null; title: string; createdAt: string; updatedAt: string }
 export interface Message { id: string; role: 'user' | 'assistant' | 'system'; content: string; createdAt: string }
 export interface Run {

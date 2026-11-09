@@ -88,6 +88,12 @@ export async function handleRequest(request, env, fetchImpl = fetch) {
     const value = request.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
+  // Only the local-assistant protocol uses bearer capabilities. Browser APIs
+  // continue to use the original session + CSRF authentication.
+  if (url.pathname.startsWith('/api/local-agent/')) {
+    const authorization = request.headers.get('authorization');
+    if (authorization) headers.set('authorization', authorization);
+  }
   headers.set('X-Kivo-Origin-Token', env.ORIGIN_TOKEN);
   headers.set('X-Kivo-Client-IP', ip);
   headers.set('CF-Connecting-IP', ip);

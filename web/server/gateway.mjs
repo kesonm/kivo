@@ -214,6 +214,15 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
 
   return {
     authorizeRun, revokeRun,
+    handleExternal(req, res) {
+      const token = /^Bearer ([A-Za-z0-9_-]{40,60})$/.exec(req.headers.authorization || '')?.[1];
+      const cap = token && capabilities.get(token);
+      req.url = '/v1/responses';
+      const task = handle(req, res).catch(() => sendError(res, 500, '模型网关内部错误。'));
+      activeRequests.add(task); cap?.tasks.add(task);
+      task.finally(() => { activeRequests.delete(task); cap?.tasks.delete(task); });
+      return task;
+    },
     start() {
       if (listening) return listening;
       server = http.createServer((req, res) => {

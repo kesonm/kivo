@@ -70,7 +70,7 @@ export async function measureWorkspace(roots, { maxBytes = 200 * 1024 * 1024, ma
   return { bytes, entries };
 }
 
-export function createRuntime({ store, config, spawnImpl = spawn, execFileImpl = execFileAsync, gatewayFactory = createGateway, fetchImpl = globalThis.fetch }) {
+export function createRuntime({ store, config, local = null, spawnImpl = spawn, execFileImpl = execFileAsync, gatewayFactory = createGateway, fetchImpl = globalThis.fetch }) {
   const active = new Map();
   const startingProjects = new Set();
   const startingUsers = new Set();
@@ -129,7 +129,10 @@ export function createRuntime({ store, config, spawnImpl = spawn, execFileImpl =
       // If cancellation races network creation, wait for provisioning to stop
       // before cleanup, so a late-created network cannot escape cleanup.
       await state.provisioning?.catch(() => {});
-      try { if (state.kind !== 'chat') await removeContainer(state); }
+      try {
+        if (state.kind === 'local') await local.call(state.user.id, state.project.deviceId, 'run.stop', { runId: state.run.id }, 8000).catch(() => { state.logs.push('无法确认电脑已响应停止；本地助手在断线后 45 秒自动停止任务。'); });
+        else if (state.kind !== 'chat') await removeContainer(state);
+      }
       catch (error) {
         await drained;
         store.updateRun(state.run.id, { error: error.message });
@@ -140,7 +143,7 @@ export function createRuntime({ store, config, spawnImpl = spawn, execFileImpl =
         return { pendingCleanup: true };
       }
       await drained;
-      if (state.kind !== 'chat') await removeNetwork(state);
+      if (state.kind !== 'chat' && state.kind !== 'local') await removeNetwork(state);
       status = state.endStatus;
       message = state.endMessage;
       const error = status === 'completed' ? undefined : (message || (status === 'interrupted' ? '任务已停止。' : '任务执行失败。'));
@@ -245,8 +248,39 @@ export function createRuntime({ store, config, spawnImpl = spawn, execFileImpl =
     }
   }
 
+  local?.setHandlers({
+    onEvent(device, event) {
+      const state = active.get(event.runId);
+      if (!state || state.kind !== 'local' || state.finishing || state.project.deviceId !== device.id || state.user.id !== device.userId) return;
+      if (!Number.isSafeInteger(event.sequence) || event.sequence <= state.eventSequence) return;
+      state.eventSequence = event.sequence; state.lastEvent = Date.now();
+      if (event.type === 'delta' && typeof event.text === 'string') appendText(state, redact(state, event.text), String(event.itemId || ''));
+      else if (event.type === 'log' && typeof event.text === 'string') log(state, event.text);
+      else if (event.type === 'thread' && typeof event.threadId === 'string' && ID.test(event.threadId)) store.updateThread(state.thread.id, { codexThreadId: event.threadId });
+      else if (event.type === 'approval') {
+        const a = event.approval;
+        if (!a || !/^[a-f0-9]{24}$/.test(a.id) || !['command', 'file'].includes(a.kind) || state.approvals.size >= 20) return;
+        state.approvals.set(a.id, { id: a.id, kind: a.kind, command: redact(state, a.command), reason: redact(state, a.reason), cwd: redact(state, a.cwd), grantRoot: redact(state, a.grantRoot), network: a.network ? { host: String(a.network.host || '').slice(0, 200), protocol: String(a.network.protocol || '').slice(0, 20) } : null });
+        emit(state.run.id, 'message', { type: 'approval' });
+      } else if (event.type === 'done') void finish(state, ['completed', 'interrupted'].includes(event.status) ? event.status : 'failed', redact(state, event.error));
+    },
+    async onRevoke(deviceId) { await Promise.allSettled([...active.values()].filter(s => s.project?.deviceId === deviceId).map(s => finish(s, 'interrupted', '本地设备配对已撤销。'))); },
+  });
+
   return {
     providerConfigured: userId => Boolean(userId && store.getApiKeyMetadata(userId)?.configured),
+    localResponses(req, res) {
+      if (req.headers.origin || req.headers.cookie) { res.statusCode = 403; res.end(); return; }
+      return gateway.handleExternal(req, res);
+    },
+    approvals(runId) { return [...(active.get(runId)?.approvals?.values() || [])]; },
+    async approve(runId, approvalId, decision) {
+      const state = active.get(runId);
+      if (!state || state.kind !== 'local' || !state.approvals.has(approvalId) || !['accept', 'decline'].includes(decision)) throw new GatewayError('审批已失效，请刷新。', 409);
+      await local.call(state.user.id, state.project.deviceId, 'run.respond', { runId, approvalId, decision });
+      state.approvals.delete(approvalId);
+      store.audit(state.user.id, 'local.approval.' + decision, runId, approvalId);
+    },
     async start({ run, thread, project, user, text }) {
       if (closing) throw new GatewayError('服务正在重启，请稍后重试。', 503);
       const account = user?.id && store.getUser(user.id);
@@ -271,6 +305,20 @@ export function createRuntime({ store, config, spawnImpl = spawn, execFileImpl =
         if (!store.getUserApiKey(user.id)) throw new GatewayError('请先在个人设置中填写你的 OpenAI API 密钥。', 409);
         if (closing || cancelledRuns.has(run.id) || store.getRun(run.id)?.status !== 'running') throw new GatewayError('任务已取消。', 409);
       };
+      if (project?.location === 'local') {
+        if (!local) throw new GatewayError('本地助手尚未启用。', 503);
+        local.owned(user.id, project.deviceId);
+        if ([...active.values()].some(s => s.project?.deviceId === project.deviceId)) throw new GatewayError('该电脑已有任务在运行。', 409);
+        checkAccount();
+        const state = { kind: 'local', run, thread, project, user, token: '', output: '', logs: [], pending: new Map(), approvals: new Map(), eventSequence: 0, finishing: null };
+        state.token = gateway.authorizeRun({ id: run.id, userId: user.id });
+        active.set(run.id, state); startingProjects.delete(operationKey); startingUsers.delete(user.id);
+        state.timeout = setTimeout(() => { void finish(state, 'interrupted', '本地任务达到时长上限。'); }, config.runTimeoutMs || 600_000); state.timeout.unref();
+        log(state, '正在连接你的电脑，在本地项目中执行任务…');
+        try { await local.projectCall(project, 'run.start', { runId: run.id, codexThreadId: thread.codexThreadId, token: state.token, model: config.model, text, timeoutMs: config.runTimeoutMs }); }
+        catch (error) { await finish(state, 'failed', redact(state, error.message)); throw error; }
+        return store.getRun(run.id);
+      }
       if (isChat) {
         // Validate the full persisted history before acquiring a provider token.
         // This branch never touches project directories or starts Docker.
@@ -396,6 +444,7 @@ export function createRuntime({ store, config, spawnImpl = spawn, execFileImpl =
       await Promise.allSettled([...states.map(s => finish(s, 'interrupted', '服务重启，任务已停止。')), ...[...startingWaiters.values()].map(waiter => waiter.promise)]);
       await Promise.allSettled(states.map(s => s.execution).filter(Boolean));
       await gateway.close();
+      local?.close();
     },
   };
 }

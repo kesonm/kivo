@@ -66,6 +66,16 @@ export function createStore(dbPath,{credentialsKey}={}) {
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS projects_user ON projects(user_id);
+    CREATE TABLE IF NOT EXISTS local_devices (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
+      platform TEXT NOT NULL, root_name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL,
+      last_seen INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS local_projects (
+      project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      device_id TEXT NOT NULL REFERENCES local_devices(id), path TEXT NOT NULL,
+      UNIQUE(device_id,path)
+    );
     CREATE TABLE IF NOT EXISTS threads (
       id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
       user_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL, codex_thread_id TEXT,
@@ -141,7 +151,7 @@ export function createStore(dbPath,{credentialsKey}={}) {
     return {id:r.id,username:r.username,displayName:r.display_name,role:r.role,disabled:Boolean(r.disabled),usedTokens:used,
       apiKeyConfigured:key.configured,keyLast4:key.last4,createdAt:r.created_at};
   };
-  const projectView = (r) => r ? ({id:r.id,userId:r.user_id,name:r.name,createdAt:r.created_at,updatedAt:r.updated_at}) : null;
+  const projectView = (r) => { if(!r)return null;const local=db.prepare('SELECT device_id,path FROM local_projects WHERE project_id=?').get(r.id);return {id:r.id,userId:r.user_id,name:r.name,createdAt:r.created_at,updatedAt:r.updated_at,...(local?{location:'local',deviceId:local.device_id,localPath:local.path}:{location:'cloud'})}; };
   const threadView = (r) => r ? ({id:r.id,projectId:r.project_id,userId:r.user_id,title:r.title,codexThreadId:r.codex_thread_id,createdAt:r.created_at,updatedAt:r.updated_at}) : null;
   const runView = (r) => r ? ({id:r.id,threadId:r.thread_id,projectId:r.project_id,userId:r.user_id,status:r.status,
     output:r.output,logs:JSON.parse(r.logs),error:r.error,createdAt:r.created_at,updatedAt:r.updated_at}) : null;

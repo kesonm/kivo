@@ -4,6 +4,7 @@ import { api, dateTime, enc, messageOf } from './api';
 import { Icon, Logo } from './icons';
 import { getDirtyFile } from './navigation';
 import { Files } from './Files';
+import { LocalApprovals } from './Local';
 import { ErrorBox, Loading, StatusBadge, useDialog, useNotice } from './ui';
 import type { Message, Project, Run, Thread, User } from './types';
 
@@ -21,10 +22,10 @@ const chatStarters = [
   { icon: 'edit', title: '润色文字', text: '我想润色一段文字。请先问我文字的用途和希望的语气。' },
 ];
 
-export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged, user, providerConfigured, model, refreshSession, onRenameProject, onDeleteProject, onOpenAccount }: {
+export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged, user, providerConfigured, model, refreshSession, onRenameProject, onDeleteProject, onOpenAccount, onOpenLocal }: {
   project: Project | null; threadId: string | null; onThreadCreated: (thread: Thread) => void; onThreadsChanged: () => void;
   user: User; providerConfigured: boolean; model?: string; refreshSession: () => Promise<void>;
-  onRenameProject: () => void; onDeleteProject: () => void; onOpenAccount: () => void;
+  onRenameProject: () => void; onDeleteProject: () => void; onOpenAccount: () => void; onOpenLocal: () => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [run, setRun] = useState<Run | null>(null);
@@ -117,7 +118,7 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
     if (!text || sendingRef.current || loading || running || !providerConfigured) return;
     sendingRef.current = true; setSending(true);
     try {
-      if (project && getDirtyFile() && !await ask({ title: '使用已保存的文件开始任务？', description: `${getDirtyFile()} 尚有未保存的编辑。kivo 将使用服务器上已保存的文件版本。你也可以取消并先保存文件。`, confirm: '使用已保存的版本' })) return;
+      if (project && getDirtyFile() && !await ask({ title: '使用已保存的文件开始任务？', description: `${getDirtyFile()} 尚有未保存的编辑。kivo 将使用${project.location === 'local' ? '电脑' : '服务器'}上已保存的文件版本。你也可以取消并先保存文件。`, confirm: '使用已保存的版本' })) return;
       if (!mounted.current) return;
       setError(''); pinBottom.current = true;
       let id = threadId;
@@ -160,12 +161,13 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
     <form className={'composer' + (project ? '' : ' composer-chat') + (running ? ' composer-running' : '')} onSubmit={send}>
       <div className="composer-input-row">
         {project && <button type="button" className="icon-button composer-attach" title="项目文件、上传与代码差异" aria-label="打开项目文件" onClick={() => void changePanel(true)}><Icon name="plus" size={23} /></button>}
+        {!project && <button type="button" className="icon-button composer-attach" title="打开本地文件夹开始项目对话" aria-label="打开本地文件夹" disabled={running || sending} onClick={onOpenLocal}><Icon name="folder" size={21} /></button>}
         <textarea ref={textarea} value={input} onChange={event => setInput(event.target.value)} placeholder={running ? 'kivo 正在执行任务…' : '有问题，尽管问'} aria-label="发送给 kivo 的消息" disabled={loading || sending || running} maxLength={24000} rows={1} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
         <span className="composer-model" title="当前模型">{model || '默认模型'}</span>
         {running ? <button type="button" className="send-button stop-button" title="停止任务" aria-label="停止任务" disabled={stopping} onClick={() => void interrupt()}>{stopping ? <span className="spinner" /> : <Icon name="stop" size={17} />}</button> : <button type="submit" className="send-button" title="发送消息" aria-label="发送消息" disabled={!input.trim() || sending || loading || !providerConfigured}>{sending ? <span className="spinner" /> : <Icon name="send" size={21} />}</button>}
       </div>
     </form>
-    <div className="composer-footer">{project && <button type="button" className="composer-project" onClick={() => void changePanel(true)} title="查看项目文件"><Icon name="folder" size={13} /><span>{project.name}</span></button>}<span>管理员可查看会话与执行记录</span><span className="composer-shortcut">Shift + Enter 换行</span></div>
+    <div className="composer-footer">{project && <button type="button" className="composer-project" onClick={() => void changePanel(true)} title="查看项目文件"><Icon name="folder" size={13} /><span>{project.name}{project.location === 'local' ? ' · 本地电脑' : ' · 云端'}</span></button>}<span>管理员可查看会话与执行记录</span><span className="composer-shortcut">Shift + Enter 换行</span></div>
   </div>;
   return <div className={'workspace-body' + (panelOpen ? ' with-panel' : '')}>
     <section className={'chat-panel' + (emptyConversation ? ' chat-panel-empty' : '')}>
@@ -184,6 +186,7 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
             {messages.map(message => <article key={message.id} className={'chat-message message-' + message.role}><div className={'message-avatar' + (message.role === 'assistant' ? ' assistant-avatar logo-container' : '')}>{message.role === 'assistant' ? <Logo /> : message.role === 'user' ? (user.displayName || user.username).slice(0, 1).toUpperCase() : <Icon name="info" size={17} />}</div><div className="message-main"><div className="message-heading"><strong>{message.role === 'assistant' ? 'kivo' : message.role === 'user' ? user.displayName || user.username : '系统'}</strong><time>{dateTime(message.createdAt)}</time>{message.role === 'assistant' && <button className="icon-button message-copy" title="复制回答" aria-label="复制回答" onClick={() => void copy(message.content)}><Icon name="copy" size={14} /></button>}</div>{message.role === 'user' ? <div className="user-message-content">{message.content}</div> : <Markdown content={message.content} />}</div></article>)}
             {showRunOutput && <article className="chat-message message-assistant"><div className="message-avatar assistant-avatar logo-container"><Logo /></div><div className="message-main"><div className="message-heading"><strong>kivo</strong><StatusBadge status={run.status} /></div>{run.output ? <Markdown content={run.output} /> : <div className="thinking"><span /><span /><span /><small>正在处理你的任务</small></div>}</div></article>}
             {run && run.logs?.length > 0 && <details className="tool-activity" open={running}><summary><Icon name="terminal" size={15} /><span>执行活动</span><small>{run.logs.length} 条</small><Icon name="down" size={14} /></summary><div className="tool-log">{run.logs.map((log, index) => <div key={index}><span className="tool-log-dot" /><pre>{log}</pre></div>)}</div></details>}
+            {running && run && project?.location === 'local' && <LocalApprovals runId={run.id} />}
             {run?.status === 'failed' && <div className="run-outcome"><Icon name="alert" size={16} /><span>{run.error || '任务未能完成，请查看执行活动后重试。'}</span></div>}
             {run?.status === 'interrupted' && <div className="run-outcome neutral"><Icon name="stop" size={15} /><span>任务已停止。你可以继续发送消息。</span></div>}
           </div>}
