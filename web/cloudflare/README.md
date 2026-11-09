@@ -36,4 +36,39 @@ SSE 原样流式转发，后端每 15 秒发送心跳。断线由客户端重连
 
 所有应用构建与测试在服务器执行：`npm test` 覆盖原有功能及 Worker 的来源校验、固定回源、伪造头清理、Cookie/CSRF 透传、SSE、重定向拒绝、静态安全头。`npm run check:cloudflare` 进行不发布的 Wrangler 打包验证。
 
+## 原生 workerd 冒烟测试（仅服务器）
+
+`native-smoke.mjs` 将实际 Worker 源码交给 Miniflare 的原生 workerd 执行，所有回源均由内存假服务处理，只使用假 Cookie、CSRF 和回源令牌。它覆盖健康检查、POST 请求体、会话头、分块 SSE 与心跳、重定向和跨域拒绝；另将旧的 `cache: 'no-store'` 与 `cf.cacheTtl: 0` 冲突重新注入内存副本，断言原生运行时在发出请求前拒绝，防止只用 Node mock 漏掉兼容约束。
+
+2026-11-09 已在 Ubuntu 的 Node 24.22.2 构建容器中通过上述正测与负控。临时安装使用官方 npm 的固定 `wrangler@4.158.0`，当次附带 `miniflare@5.20261104.0-beta`；脚本使用该版本提供的 `convertV4MiniflareOptions`。Miniflare 不加入应用日常依赖。脚本首个参数是包含 `cloudflare/worker.mjs` 和 `wrangler.jsonc` 的来源目录；未传时默认脚本所在目录的上一级，即 `web/`。
+
+以下沿用已验证的临时安装和隔离容器方式；将来源目录与构建镜像改为服务器上要验证的版本。脚本复制到临时 npm 安装目录，使其能解析 Miniflare。安装阶段允许联网，正式测试使用 `--network none`，仅只读挂载发布源码和测试依赖，不挂载生产数据、配置或 Docker socket。
+
+```sh
+ssh ubuntu
+native_smoke_source=/opt/codex-web/releases/1.3.1
+native_smoke_dir=$(sudo mktemp -d /tmp/kivo-cf-native-smoke.XXXXXX)
+
+sudo docker run --rm --name kivo-cf-native-install --network host \
+  --mount "type=bind,source=$native_smoke_dir,target=/probe" \
+  --entrypoint npm codex-workspace-build:1.3.1 \
+  install --prefix /probe --no-audit --no-fund \
+  --registry https://registry.npmjs.org wrangler@4.158.0
+
+sudo install -m 600 "$native_smoke_source/cloudflare/native-smoke.mjs" "$native_smoke_dir/smoke.mjs"
+sudo docker run --rm --name kivo-cf-native-smoke --network none --read-only \
+  --tmpfs /tmp:rw,nosuid,size=256m \
+  --mount "type=bind,source=$native_smoke_dir,target=/probe,readonly" \
+  --mount "type=bind,source=$native_smoke_source,target=/source,readonly" \
+  --workdir /tmp --entrypoint node codex-workspace-build:1.3.1 \
+  /probe/smoke.mjs /source
+
+# 测试容器退出时自动删除；仅清理本次创建的临时依赖目录。
+case "$native_smoke_dir" in
+  /tmp/kivo-cf-native-smoke.*) sudo rm -rf -- "$native_smoke_dir" ;;
+esac
+```
+
+通过时输出两行 `PASS`。该测试验证 Worker 原生语义与流式代理，不代表生产 DNS/TLS、真实回源凭据或付费 OpenAI 调用已通过；线上链路仍需单独验收。
+
 官方参考：[Static Assets 计费](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/)、[Workers 限制](https://developers.cloudflare.com/workers/platform/limits/)、[自定义域名](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)。
