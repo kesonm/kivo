@@ -1,0 +1,52 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+		6A09A69CF6BA30E41223E16C = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KivoApp.swift; sourceTree = "<group>"; };
+		A31604CB883CA8135F926366 = { isa = PBXBuildFile; fileRef = 6A09A69CF6BA30E41223E16C; };
+		4E7B92EF6EB35D642DCD909E = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginCode.swift; sourceTree = "<group>"; };
+		0391AFB1E5C0382B304077DF = { isa = PBXBuildFile; fileRef = 4E7B92EF6EB35D642DCD909E; };
+		24DEC11AD1F7137788013AB3 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneAPI.swift; sourceTree = "<group>"; };
+		9D1A0A54459139713E8E5471 = { isa = PBXBuildFile; fileRef = 24DEC11AD1F7137788013AB3; };
+		40DCC3BFC0DC07FC33EB34F9 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceView.swift; sourceTree = "<group>"; };
+		EC42F1777A3AA50A92838253 = { isa = PBXBuildFile; fileRef = 40DCC3BFC0DC07FC33EB34F9; };
+		79A21E9D15C8E6E1646953CD = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScanner.swift; sourceTree = "<group>"; };
+		4AD5E3DBD67C82AFA9D22B33 = { isa = PBXBuildFile; fileRef = 79A21E9D15C8E6E1646953CD; };
+		5EE1E220415320A09C03552C = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginCodeTests.swift; sourceTree = "<group>"; };
+		5FEA39B6A4FB8DA13F03134F = { isa = PBXBuildFile; fileRef = 5EE1E220415320A09C03552C; };
+		795A02A63DC9C1E86758E98F = { isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		D0ADC22F3C046CC76298F620 = { isa = PBXBuildFile; fileRef = 795A02A63DC9C1E86758E98F; };
+		6D123AE8AB04EEE632CC6C18 = { isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		FD57E9B16885BEBF76EEE08F = { isa = PBXBuildFile; fileRef = 6D123AE8AB04EEE632CC6C18; };
+		9AC3B5AD93CBC0305C62F78F = { isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		681C948D238C526E9E3424E0 = { isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Kivo.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F739566ED5280322FF98A798 = { isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KivoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1455444174429298B0F374B3 = { isa = PBXGroup; path = Kivo; sourceTree = "<group>"; children = (6A09A69CF6BA30E41223E16C, 4E7B92EF6EB35D642DCD909E, 24DEC11AD1F7137788013AB3, 40DCC3BFC0DC07FC33EB34F9, 79A21E9D15C8E6E1646953CD, 795A02A63DC9C1E86758E98F, 9AC3B5AD93CBC0305C62F78F, 6D123AE8AB04EEE632CC6C18,); };
+		C4E2E7F217DE3642E7714F4E = { isa = PBXGroup; path = KivoTests; sourceTree = "<group>"; children = (5EE1E220415320A09C03552C,); };
+		0A3E27B8CA818264D75C8D81 = { isa = PBXGroup; name = Products; sourceTree = "<group>"; children = (681C948D238C526E9E3424E0, F739566ED5280322FF98A798,); };
+		19F479106CE8C3BA8C106518 = { isa = PBXGroup; sourceTree = "<group>"; children = (1455444174429298B0F374B3, C4E2E7F217DE3642E7714F4E, 0A3E27B8CA818264D75C8D81,); };
+		878A52FC5FF6A57D50B7B870 = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A31604CB883CA8135F926366, 0391AFB1E5C0382B304077DF, 9D1A0A54459139713E8E5471, EC42F1777A3AA50A92838253, 4AD5E3DBD67C82AFA9D22B33,); runOnlyForDeploymentPostprocessing = 0; };
+		DEE94446A282611C16F7781C = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (5FEA39B6A4FB8DA13F03134F,); runOnlyForDeploymentPostprocessing = 0; };
+		41D311A605520FC7B8B9A980 = { isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (D0ADC22F3C046CC76298F620, FD57E9B16885BEBF76EEE08F,); runOnlyForDeploymentPostprocessing = 0; };
+		E2AA269EB967A8853A258BFA = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		B10CDED79664567B030B2B4F = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		48FB79789A65B0810B94A662 = { isa = PBXShellScriptBuildPhase; buildActionMask = 2147483647; files = (); inputPaths = ("$(SRCROOT)/Kivo/Assets.xcassets/Brand.imageset/logo.png",); outputPaths = ("$(SRCROOT)/Kivo/Assets.xcassets/AppIcon.appiconset/AppIcon.png",); name = "Prepare existing logo"; runOnlyForDeploymentPostprocessing = 0; shellPath = /bin/sh; shellScript = "/usr/bin/sips -z 1024 1024 \"$SRCROOT/Kivo/Assets.xcassets/Brand.imageset/logo.png\" --out \"$SRCROOT/Kivo/Assets.xcassets/AppIcon.appiconset/AppIcon.png\" >/dev/null\n"; };
+		A172CEDCAE47474B615C54D5 = { isa = PBXNativeTarget; buildConfigurationList = 7BCEE9A04133D8A2FED7D4D3; buildPhases = (48FB79789A65B0810B94A662, 878A52FC5FF6A57D50B7B870, E2AA269EB967A8853A258BFA, 41D311A605520FC7B8B9A980,); buildRules = (); dependencies = (); name = Kivo; productName = Kivo; productReference = 681C948D238C526E9E3424E0; productType = "com.apple.product-type.application"; };
+		DAB01D73CBBCF1FEDE84E2D6 = { isa = PBXContainerItemProxy; containerPortal = 244210E48437B6556980A702; proxyType = 1; remoteGlobalIDString = A172CEDCAE47474B615C54D5; remoteInfo = Kivo; };
+		F9A94CEF8CF7D85CE881E703 = { isa = PBXTargetDependency; target = A172CEDCAE47474B615C54D5; targetProxy = DAB01D73CBBCF1FEDE84E2D6; };
+		9F86D081884C7D659A2FEAA0 = { isa = PBXNativeTarget; buildConfigurationList = AD7020964E1E033F765FE484; buildPhases = (DEE94446A282611C16F7781C, B10CDED79664567B030B2B4F,); buildRules = (); dependencies = (F9A94CEF8CF7D85CE881E703,); name = KivoTests; productName = KivoTests; productReference = F739566ED5280322FF98A798; productType = "com.apple.product-type.bundle.unit-test"; };
+		73EBF6644258C120893E685D = { isa = XCBuildConfiguration; buildSettings = { SWIFT_VERSION = "5.0"; IPHONEOS_DEPLOYMENT_TARGET = "16.0"; SDKROOT = "iphoneos"; CLANG_ENABLE_MODULES = "YES"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; ENABLE_TESTABILITY = "YES"; DEBUG_INFORMATION_FORMAT = "dwarf"; ENABLE_USER_SCRIPT_SANDBOXING = "NO"; }; name = Debug; };
+		0B0C687DF8B6B8DC790B519C = { isa = XCBuildConfiguration; buildSettings = { SWIFT_VERSION = "5.0"; IPHONEOS_DEPLOYMENT_TARGET = "16.0"; SDKROOT = "iphoneos"; CLANG_ENABLE_MODULES = "YES"; SWIFT_OPTIMIZATION_LEVEL = "-O"; ENABLE_TESTABILITY = "NO"; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; ENABLE_USER_SCRIPT_SANDBOXING = "NO"; }; name = Release; };
+		B4E10CAA9C5E22150B71559C = { isa = XCConfigurationList; buildConfigurations = (73EBF6644258C120893E685D, 0B0C687DF8B6B8DC790B519C,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		B00CCDD09424E369308D67FA = { isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_STYLE = "Automatic"; CURRENT_PROJECT_VERSION = "1"; MARKETING_VERSION = "1.5.0"; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = "1,2"; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = "NO"; PRODUCT_BUNDLE_IDENTIFIER = "xyz.iptnet.kivo"; INFOPLIST_FILE = "Kivo/Info.plist"; ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; }; name = Debug; };
+		1B104479E55E37CF8A63CBDF = { isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_STYLE = "Automatic"; CURRENT_PROJECT_VERSION = "1"; MARKETING_VERSION = "1.5.0"; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = "1,2"; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = "NO"; PRODUCT_BUNDLE_IDENTIFIER = "xyz.iptnet.kivo"; INFOPLIST_FILE = "Kivo/Info.plist"; ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; }; name = Release; };
+		7BCEE9A04133D8A2FED7D4D3 = { isa = XCConfigurationList; buildConfigurations = (B00CCDD09424E369308D67FA, 1B104479E55E37CF8A63CBDF,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		DD3F495F7D6A5AA1C1769021 = { isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_STYLE = "Automatic"; CURRENT_PROJECT_VERSION = "1"; MARKETING_VERSION = "1.5.0"; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = "1,2"; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = "NO"; PRODUCT_BUNDLE_IDENTIFIER = "xyz.iptnet.kivo.tests"; GENERATE_INFOPLIST_FILE = "YES"; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Kivo.app/Kivo"; BUNDLE_LOADER = "$(TEST_HOST)"; }; name = Debug; };
+		E670BC2FFE794172EBC92AE3 = { isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_STYLE = "Automatic"; CURRENT_PROJECT_VERSION = "1"; MARKETING_VERSION = "1.5.0"; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = "1,2"; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = "NO"; PRODUCT_BUNDLE_IDENTIFIER = "xyz.iptnet.kivo.tests"; GENERATE_INFOPLIST_FILE = "YES"; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Kivo.app/Kivo"; BUNDLE_LOADER = "$(TEST_HOST)"; }; name = Release; };
+		AD7020964E1E033F765FE484 = { isa = XCConfigurationList; buildConfigurations = (DD3F495F7D6A5AA1C1769021, E670BC2FFE794172EBC92AE3,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		244210E48437B6556980A702 = { isa = PBXProject; attributes = { BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 1600; }; buildConfigurationList = B4E10CAA9C5E22150B71559C; compatibilityVersion = "Xcode 14.0"; developmentRegion = zh_CN; hasScannedForEncodings = 0; knownRegions = (en, zh_CN, Base); mainGroup = 19F479106CE8C3BA8C106518; productRefGroup = 0A3E27B8CA818264D75C8D81; projectDirPath = ""; projectRoot = ""; targets = (A172CEDCAE47474B615C54D5, 9F86D081884C7D659A2FEAA0,); };
+	};
+	rootObject = 244210E48437B6556980A702;
+}

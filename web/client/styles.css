@@ -115,6 +115,15 @@ h1, h2, h3, p { margin-top: 0; }
 .auth-submit { margin-top: 5px; min-height: 48px; font-size: 15px; }
 .auth-hint { display: flex; align-items: flex-start; color: var(--muted); font-size: 12px !important; gap: 7px; margin-top: 23px; line-height: 1.8 !important; text-align: left !important; }.auth-hint .icon { margin-top: 3px; }
 .auth-form-footer { font-size: 11px; line-height: 1.8; color: #888; text-align: center; padding: 20px 0 6px; }
+.auth-methods { display: flex; gap: 22px; justify-content: center; margin: -6px 0 25px; }
+.auth-methods button { color: var(--muted); padding: 8px 0; border-bottom: 2px solid transparent; }
+.auth-methods button.active { color: var(--ink); border-bottom-color: currentColor; }
+.qr-login { display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; }
+.qr-login-code { width: 242px; height: 242px; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; display: grid; place-items: center; background: #fff; }
+.qr-login-code img { display: block; width: 240px; height: 240px; }
+.qr-login p { margin: 0; font-size: 13px; line-height: 1.8; }
+.qr-verification { color: #202020; font-variant-numeric: tabular-nums; letter-spacing: 3px; margin-left: 5px; }
+.qr-instructions { max-width: 310px; color: var(--muted); }
 .registration-privacy { display: flex; align-items: flex-start; gap: 8px; color: #666; background: #f7f7f7; border-radius: 10px; padding: 12px; font-size: 12px; line-height: 1.8; }.registration-privacy .icon { margin-top: 3px; }
 
 /* Navigation */

@@ -9,6 +9,7 @@ import { createStore, AppError } from './store.mjs';
 import { createProjects } from './projects.mjs';
 import { loadCredentialsKey } from './credentials.mjs';
 import { createLocalBridge, localPath } from './local.mjs';
+import { createQrLogin } from './qr-login.mjs';
 
 const scrypt=promisify(scryptCallback);
 const cookieName='cw_session';
@@ -55,6 +56,7 @@ export async function bootstrapAdmin(store,config){
 
 export function createApp({store,runtime,config,local=null,projects:createProjectsOverride}){
   const app=express();const projects=createProjectsOverride??createProjects(config);const limits=new Map();const loginFailures=new Map();
+  const qrLogin=createQrLogin(store,config.publicOrigin||'https://kivo.iptnet.xyz');
   const dummyHash='scrypt$16384$8$1$00000000000000000000000000000000$'+'00'.repeat(64);
   app.disable('x-powered-by');app.set('trust proxy',config.trustProxy??false);
   app.use((req,res,next)=>{
@@ -98,8 +100,11 @@ export function createApp({store,runtime,config,local=null,projects:createProjec
   }
   function setSession(res,userId=null){
     const session=store.createSession(userId);
-    res.setHeader('Set-Cookie',`${cookieName}=${session.token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400${config.cookieSecure?'; Secure':''}`);
+    sessionCookie(res,session);
     return session;
+  }
+  function sessionCookie(res,session){
+    res.setHeader('Set-Cookie',`${cookieName}=${session.token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400${config.cookieSecure?'; Secure':''}`);
   }
   function auth(req,res,next){if(!req.user)throw new AppError('请先登录',401);next();}
   function admin(req,res,next){if(!req.user)throw new AppError('请先登录',401);if(req.user.role!=='admin')throw new AppError('仅管理员可访问',403);next();}
@@ -124,6 +129,20 @@ export function createApp({store,runtime,config,local=null,projects:createProjec
     if((req.get('origin')&&req.get('origin')!==expected)||req.get('sec-fetch-site')==='cross-site')throw new AppError('请求来源不被允许',403);
     if(!req.session||!safeEqual(req.get('x-csrf-token'),req.session.csrfToken))throw new AppError('页面会话已过期，请刷新后重试',403,'csrf_invalid');
     next();
+  });
+  app.post('/api/auth/qr',async(req,res)=>{
+    rate(req,'qr-create',20,600_000);
+    res.status(201).json(await qrLogin.create(req.sessionToken,req.get('user-agent')));
+  });
+  app.get('/api/auth/qr/:id',(req,res)=>{rate(req,'qr-status',120,60_000);res.json(qrLogin.status(req.params.id,req.sessionToken));});
+  app.delete('/api/auth/qr/:id',(req,res)=>{qrLogin.cancel(req.params.id,req.sessionToken);res.json({ok:true});});
+  app.post('/api/auth/qr/scan',auth,(req,res)=>{rate(req,'qr-scan',30,600_000);res.json({...qrLogin.scan(req.body.token,req.user.id,req.sessionToken),username:req.user.username});});
+  app.post('/api/auth/qr/confirm',auth,(req,res)=>{rate(req,'qr-confirm',30,600_000);res.json(qrLogin.decide(req.body.token,req.body.decision,req.user.id,req.sessionToken));});
+  app.post('/api/auth/qr/:id/redeem',(req,res)=>{
+    rate(req,'qr-redeem',30,600_000);
+    if(req.user)throw new AppError('网页已经登录，请刷新',409);
+    const {session,user}=qrLogin.redeem(req.params.id,req.sessionToken);sessionCookie(res,session);
+    res.json({user:publicUser(user),csrfToken:session.csrfToken});
   });
   app.post('/api/auth/register',async(req,res)=>{
     rate(req,'register',10,86_400_000);if(req.user)throw new AppError('请先退出当前账号',409);

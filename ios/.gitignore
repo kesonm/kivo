@@ -1,0 +1,6 @@
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.ipa
+*.xcarchive
+Kivo/Assets.xcassets/AppIcon.appiconset/AppIcon.png

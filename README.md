@@ -8,6 +8,7 @@ kivo 是基于 OpenAI 和 Codex 的多用户网页聊天与代码工作台。
 - **项目工作台**：独立项目与项目会话，支持上传和编辑文件、查看代码差异、保存 Git 版本，以及隔离的 Codex 执行器。
 - **个人密钥**：每位用户填写自己的 OpenAI API Key，密钥加密保存，记录服务方实际返回的 token 用量。
 - **只读管理后台**：管理员查看用户、用量、会话及执行记录；无充值或额度分配。
+- **iOS 与扫码登录**：iPhone 客户端复用工作台，原生相机扫描网页二维码并明确确认授权。个人真机安装见 [iOS 说明](ios/README.md)。
 
 网页源码位于 [`web/`](web/)，部署与配置见 [网页服务文档](web/README.md)。本仓库保留 [OpenAI Codex](https://github.com/openai/codex) 上游代码及提交历史；上游介绍见 [README.upstream.md](README.upstream.md)。kivo 是独立项目，并非 OpenAI 官方服务。
 

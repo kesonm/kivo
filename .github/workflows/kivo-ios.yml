@@ -1,0 +1,44 @@
+name: kivo iOS
+on:
+  push:
+    branches: [main]
+    paths: ['ios/**', '.github/workflows/kivo-ios.yml']
+  pull_request:
+    paths: ['ios/**', '.github/workflows/kivo-ios.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: kivo-ios-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Compile unsigned iPhone application
+        run: >-
+          xcodebuild -project ios/Kivo.xcodeproj -scheme Kivo
+          -configuration Release -sdk iphoneos -destination 'generic/platform=iOS'
+          -derivedDataPath "$RUNNER_TEMP/kivo-device" CODE_SIGNING_ALLOWED=NO build
+      - name: Select an available iPhone simulator
+        run: |
+          xcrun simctl list devices available -j > "$RUNNER_TEMP/devices.json"
+          python3 - <<'PY'
+          import json, os
+          data = json.load(open(os.environ['RUNNER_TEMP'] + '/devices.json'))
+          phones = [d for runtime, devices in data['devices'].items() if 'iOS' in runtime for d in devices if d['isAvailable'] and 'iPhone' in d['name']]
+          if not phones:
+              raise SystemExit('No iPhone simulator is available')
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('KIVO_SIMULATOR=' + phones[0]['udid'] + '\n')
+          PY
+      - name: Compile simulator and run QR parser tests
+        run: >-
+          xcodebuild -project ios/Kivo.xcodeproj -scheme Kivo
+          -configuration Debug -destination "platform=iOS Simulator,id=$KIVO_SIMULATOR"
+          -derivedDataPath "$RUNNER_TEMP/kivo-simulator" CODE_SIGNING_ALLOWED=NO
+          -parallel-testing-enabled NO test
