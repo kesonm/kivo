@@ -7,12 +7,13 @@ export class ApiError extends Error {
 export async function api<T>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
   const method = options.method || 'GET';
   const mutation = !['GET', 'HEAD'].includes(method);
+  const multipart = options.body instanceof FormData ? options.body : undefined;
   const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.body !== undefined || mutation) headers['Content-Type'] = 'application/json';
+  if (!multipart && (options.body !== undefined || mutation)) headers['Content-Type'] = 'application/json';
   if (mutation) headers['X-CSRF-Token'] = csrfToken;
   const response = await fetch(path, {
     method, headers, credentials: 'same-origin', signal: options.signal,
-    body: options.body === undefined ? mutation ? '{}' : undefined : JSON.stringify(options.body),
+    body: multipart ?? (options.body === undefined ? mutation ? '{}' : undefined : JSON.stringify(options.body)),
   });
   let data: Record<string, unknown>;
   try { data = await response.json(); } catch { throw new ApiError(`服务暂时不可用（${response.status}），请稍后重试。`, response.status); }

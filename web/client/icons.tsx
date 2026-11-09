@@ -19,6 +19,7 @@ const paths: Record<string, React.ReactNode> = {
   logout: <><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m7 14 5-5-5-5m5 5H9" /></>,
   settings: <><path d="m9 3-1 3-3 1v4l-2 1 2 1v4l3 1 1 3h6l1-3 3-1v-4l2-1-2-1V7l-3-1-1-3Z" /><circle cx="12" cy="12" r="3" /></>,
   file: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" /><path d="M14 2v6h6M8 13h8m-8 4h5" /></>,
+  image: <><rect x="3" y="3" width="18" height="18" rx="3" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="m21 16-5-5-8 10" /></>,
   diff: <><path d="M8 3v12a4 4 0 0 0 4 4h4M16 3v4a4 4 0 0 1-4 4H8" /><circle cx="8" cy="3" r="2" /><circle cx="16" cy="3" r="2" /><circle cx="16" cy="19" r="2" /></>,
   refresh: <><path d="M20 7v5h-5M4 17v-5h5" /><path d="M6 6a8 8 0 0 1 13 2l1 4M4 12l1 4a8 8 0 0 0 13 2" /></>,
   search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></>,
@@ -47,7 +48,7 @@ export function Icon({ name, size = 18, className = '', style }: { name: string;
   return <svg className={`icon ${className}`} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={style}>{paths[name] || paths.code}</svg>;
 }
 export function Logo() {
-  return <img className="brand-logo" src="/logo.png" alt="" aria-hidden="true" draggable={false} />;
+  return <img className="brand-logo" src="/logo.png?v=1.6.0" alt="" aria-hidden="true" draggable={false} />;
 }
 export function Brand({ small = false }: { small?: boolean }) {
   return <div className={`brand ${small ? 'brand-small' : ''}`}><span className="brand-mark logo-container"><Logo /></span><span>kivo</span></div>;

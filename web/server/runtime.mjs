@@ -146,9 +146,21 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       if (state.kind !== 'chat' && state.kind !== 'local') await removeNetwork(state);
       status = state.endStatus;
       message = state.endMessage;
+      if (state.kind === 'chat' && (state.output || state.artifacts.length || state.citations.length)) {
+        try {
+          store.appendMessage(state.thread.id, 'assistant', state.output, { artifacts: state.artifacts, citations: state.citations });
+        } catch (saveError) {
+          if (!state.artifacts.length) throw saveError;
+          status = 'failed';
+          message = saveError.code === 'chat_artifact_storage_full' ? saveError.message : '图片已生成，但服务器未能保存图片。';
+          console.error(JSON.stringify({ event: 'chat_image_save_failed', runId: state.run.id, storageFull: saveError.code === 'chat_artifact_storage_full' }));
+          if (state.output) store.appendMessage(state.thread.id, 'assistant', state.output, { citations: state.citations });
+        }
+      } else if (state.kind !== 'chat' && state.output) {
+        store.appendMessage(state.thread.id, 'assistant', state.output);
+      }
       const error = status === 'completed' ? undefined : (message || (status === 'interrupted' ? '任务已停止。' : '任务执行失败。'));
       store.updateRun(state.run.id, { status, output: state.output, logs: state.logs, error });
-      if (state.output) store.appendMessage(state.thread.id, 'assistant', state.output);
       if (error) store.appendMessage(state.thread.id, 'system', error);
       emit(state.run.id, 'done', { status, message: error });
       active.delete(state.run.id);
@@ -176,12 +188,15 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
   }
   function appendText(state, text, itemId) {
     if (!text || state.finishing) return;
-    if (itemId && state.lastMessageId && itemId !== state.lastMessageId && state.output && !state.output.endsWith('\n')) text = `\n\n${text}`;
+    const separator = itemId && state.lastMessageId && itemId !== state.lastMessageId && state.output && !state.output.endsWith('\n') ? '\n\n' : '';
+    const offset = state.output.length + separator.length;
+    text = separator + text;
     if (itemId) state.lastMessageId = itemId;
     state.output += text;
     if (Buffer.byteLength(state.output) > OUTPUT_LIMIT) { void finish(state, 'failed', '回复超过大小限制，请缩小任务范围。'); return; }
     store.updateRun(state.run.id, { output: state.output });
     emit(state.run.id, 'message', { type: 'delta', text });
+    return offset;
   }
   function handleMessage(state, message) {
     if (state.finishing) return;
@@ -239,7 +254,10 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
   async function executeChat(state, payload, port) {
     try {
       await streamChat({ port, token: state.token, payload, signal: state.chatController.signal,
-        onText: (text, itemId) => appendText(state, text, itemId) });
+        onText: (text, itemId) => appendText(state, text, itemId),
+        onImage: artifact => state.artifacts.push(artifact),
+        onCitation: citation => state.citations.push(citation),
+        onTool: message => log(state, message) });
       if (!state.finishing) await finish(state, 'completed');
     } catch (error) {
       if (state.finishing) return;
@@ -281,7 +299,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       state.approvals.delete(approvalId);
       store.audit(state.user.id, 'local.approval.' + decision, runId, approvalId);
     },
-    async start({ run, thread, project, user, text }) {
+    async start({ run, thread, project, user, text, tool, files = [] }) {
       if (closing) throw new GatewayError('服务正在重启，请稍后重试。', 503);
       const account = user?.id && store.getUser(user.id);
       if (!account || account.disabled) throw new GatewayError('账号已停用。', 403);
@@ -323,17 +341,18 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
         // Validate the full persisted history before acquiring a provider token.
         // This branch never touches project directories or starts Docker.
         const messages = store.getMessagesForContext(thread.id, { maxMessages: CHAT_MAX_MESSAGES, maxBytes: CHAT_MAX_BYTES });
-        const payload = prepareChatRequest(messages, text, config);
+        const payload = prepareChatRequest(messages, text, config, { tool, files });
         if (!gatewayReady) gatewayReady = gateway.start();
         const address = await gatewayReady;
         checkAccount();
-        const state = { kind: 'chat', run, thread, project: null, user, token: '', output: '', logs: [], pending: new Map(), finishing: null, chatController: new AbortController() };
-        state.token = gateway.authorizeRun({ id: run.id, userId: user.id });
+        const state = { kind: 'chat', run, thread, project: null, user, token: '', output: '', logs: [], artifacts: [], citations: [], pending: new Map(), finishing: null, chatController: new AbortController() };
+        state.token = gateway.authorizeRun({ id: run.id, userId: user.id,
+          chatTools: payload.tools.map(tool => tool.type), chatFiles: files.filter(file => file.kind === 'table') });
         active.set(run.id, state);
         startingProjects.delete(operationKey); startingUsers.delete(user.id);
         state.timeout = setTimeout(() => { void finish(state, 'interrupted', '回复达到运行时长上限，已停止。'); }, config.runTimeoutMs || 20 * 60_000);
         state.timeout.unref();
-        log(state, '正在生成回复…');
+        log(state, files.length ? '正在准备分析附件…' : '正在生成回复…');
         state.execution = executeChat(state, payload, address.port);
         return store.getRun(run.id);
       }

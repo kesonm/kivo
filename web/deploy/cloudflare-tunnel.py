@@ -90,16 +90,7 @@ def restore(backup, files):
 
 
 def site_config():
-    return (MARKER + '''
-server {
-    listen 127.0.0.1:18400;
-    server_name origin-kivo.iptnet.xyz;
-    client_max_body_size 2m;
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/codex-acme;
-        try_files $uri =404;
-    }
-    location ~ ^/(api(/|$)|healthz$) {
+    proxy = '''
         if ($kivo_origin_allowed = 0) { return 403; }
         if ($kivo_client_valid = 0) { return 400; }
         proxy_pass http://127.0.0.1:18300;
@@ -115,7 +106,19 @@ server {
         proxy_send_timeout 60s;
         proxy_buffering off;
         proxy_cache off;
+'''
+    return (MARKER + '''
+server {
+    listen 127.0.0.1:18400;
+    server_name origin-kivo.iptnet.xyz;
+    client_max_body_size 2m;
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/codex-acme;
+        try_files $uri =404;
     }
+    location ~ ^/api/threads/[a-f0-9-]+/turns$ {
+        client_max_body_size 9m;''' + proxy + '''    }
+    location ~ ^/(api(/|$)|healthz$) {''' + proxy + '''    }
     location / { return 404; }
 }
 ''').encode()

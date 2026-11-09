@@ -11,15 +11,24 @@ const keyA = 'sk-project-integration-chat-aaaaaaaaaaaaaaaaAAAA';
 const keyB = 'sk-project-integration-chat-bbbbbbbbbbbbbbbbBBBB';
 const frame = event => new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
 
-test('ordinary chat completes through HTTP, runtime and gateway without creating projects, and survives a new login', { timeout: 20000 }, async t => {
+test('ordinary chat, images, web citations and multipart analysis work through HTTP and stay private', { timeout: 25000 }, async t => {
   const store = createStore(':memory:', { credentialsKey: randomBytes(32) });
   const config = { dataDir: '/nonexistent-direct-chat-test', distDir: '/nonexistent', publicOrigin: 'https://chat.example', cookieSecure: false, model: 'test-model', gatewayHost: '127.0.0.1', gatewayPort: 0, maxConcurrentRuns: 2, maxOutputTokens: 512, runTimeoutMs: 10000 };
-  const calls = [];
+  const calls = [], uploadedFiles = [], removedFiles = [];
   let projectOperations = 0;
   const forbiddenProjectOperation = () => { projectOperations++; throw new Error('ordinary chat must not invoke project storage'); };
   const projects = Object.fromEntries(['initialize', 'remove', 'withLock', 'tree', 'readFile'].map(key => [key, forbiddenProjectOperation]));
   const runtime = createRuntime({ store, config, spawnImpl: forbiddenProjectOperation, execFileImpl: forbiddenProjectOperation,
     gatewayFactory: options => createGateway({ ...options, fetchImpl: async (url, request) => {
+      if (url === 'https://api.openai.com/v1/files') {
+        const file = request.body.get('file');
+        uploadedFiles.push({ name: file.name, text: await file.text(), authorization: request.headers.authorization });
+        return Response.json({ id: 'file-csvfixture' });
+      }
+      if (url === 'https://api.openai.com/v1/files/file-csvfixture' && request.method === 'DELETE') {
+        removedFiles.push(request.headers.authorization);
+        return Response.json({ deleted: true });
+      }
       const call = { url, authorization: request.headers.authorization, payload: JSON.parse(request.body), controller: null };
       calls.push(call);
       return new Response(new ReadableStream({ start(controller) { call.controller = controller; request.signal.addEventListener('abort', () => { try { controller.error(new DOMException('Aborted', 'AbortError')); } catch {} }, { once: true }); } }), { headers: { 'content-type': 'text/event-stream' } });
@@ -33,7 +42,8 @@ test('ordinary chat completes through HTTP, runtime and gateway without creating
   async function client() {
     let cookie = '', csrf = '';
     const request = async (method, url, body, stream = false) => {
-      const result = await fetch(base + url, { method, headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf, origin: config.publicOrigin }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(10000) });
+      const multipart = body instanceof FormData;
+      const result = await fetch(base + url, { method, headers: { cookie, ...(!multipart ? { 'content-type': 'application/json' } : {}), 'x-csrf-token': csrf, origin: config.publicOrigin }, ...(body === undefined ? {} : { body: multipart ? body : JSON.stringify(body) }), signal: AbortSignal.timeout(10000) });
       if (result.headers.get('set-cookie')) cookie = result.headers.get('set-cookie').split(';')[0];
       if (stream) return result;
       const data = await result.json(); if (data.csrfToken) csrf = data.csrfToken;
@@ -96,4 +106,50 @@ test('ordinary chat completes through HTTP, runtime and gateway without creating
   assert.equal((await restored.request('POST', '/api/auth/login', { username: 'chat_alice', password: 'Integration-password-2026' })).status, 200);
   const saved = (await restored.request('GET', `/api/threads/${a.id}`)).data;
   assert.equal(saved.messages.length, 4); assert.equal(saved.thread.projectId, null);
+
+  async function toolTurn(body, output, beforeTerminal = []) {
+    const callNumber = calls.length;
+    const started = await restored.request('POST', `/api/threads/${a.id}/turns`, body);
+    assert.equal(started.status, 202, JSON.stringify(started.data));
+    const stream = await restored.request('GET', `/api/runs/${started.data.run.id}/events`, undefined, true);
+    const deadline = Date.now() + 5000;
+    while (!calls[callNumber]?.controller && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+    const call = calls[callNumber]; assert.ok(call?.controller);
+    for (const event of beforeTerminal) call.controller.enqueue(frame(event));
+    call.controller.enqueue(frame({ type: 'response.completed', response: { output, usage: { input_tokens: 20, output_tokens: 10, total_tokens: 30 } } }));
+    call.controller.close();
+    assert.match(await stream.text(), /"status":"completed"/);
+    return { call, ...(await restored.request('GET', `/api/threads/${a.id}`)).data };
+  }
+  const picture = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZpQAAAAASUVORK5CYII=', 'base64');
+  const imageItem = { id: 'img_result', type: 'image_generation_call', status: 'completed', result: picture.toString('base64') };
+  const generated = await toolTurn({ text: '画一只小狗', tool: 'image' }, [imageItem], [{ type: 'response.output_item.done', output_index: 0, item: imageItem }]);
+  assert.deepEqual(generated.call.payload.tool_choice, { type: 'image_generation' });
+  const artifacts = generated.messages.at(-1).artifacts;
+  assert.equal(artifacts.length, 1);
+  const download = await restored.request('GET', artifacts[0].url, undefined, true);
+  assert.equal(download.headers.get('content-type'), 'image/png');
+  assert.deepEqual(Buffer.from(await download.arrayBuffer()), picture);
+  assert.equal((await bob.request('GET', artifacts[0].url)).status, 404);
+
+  const search = await toolTurn({ text: '联网查资料', tool: 'search' }, [{ type: 'message', id: 'web-answer', role: 'assistant',
+    content: [{ type: 'output_text', text: '这是引用', annotations: [
+      { type: 'url_citation', start_index: 0, end_index: 4, url: 'https://example.org/source', title: '资料' },
+      { type: 'url_citation', start_index: 0, end_index: 4, url: 'javascript:alert(1)', title: 'Invalid' },
+    ] }] }]);
+  assert.deepEqual(search.call.payload.tools, [{ type: 'web_search' }]);
+  assert.deepEqual(search.messages.at(-1).citations, [{ url: 'https://example.org/source', title: '资料', startIndex: 0, endIndex: 4 }]);
+
+  const form = new FormData();
+  form.set('tool', 'analyze');
+  form.set('text', '计算合计');
+  form.append('files', new Blob(['value\n3\n5\n'], { type: 'text/csv' }), 'sales.csv');
+  form.append('files', new Blob(['%PDF-1.4 fixture'], { type: 'application/pdf' }), 'notes.pdf');
+  const analysis = await toolTurn(form, [{ type: 'message', id: 'file-answer', role: 'assistant', content: [{ type: 'output_text', text: '合计 8' }] }]);
+  assert.deepEqual(analysis.call.payload.tool_choice, { type: 'code_interpreter' });
+  assert.deepEqual(analysis.call.payload.tools[0].container.file_ids, ['file-csvfixture']);
+  assert.equal(analysis.call.payload.input.at(-1).content.at(-1).type, 'input_file');
+  assert.deepEqual(analysis.messages.at(-2).attachments.map(file => file.name), ['sales.csv', 'notes.pdf']);
+  assert.deepEqual(uploadedFiles, [{ name: 'sales.csv', text: 'value\n3\n5\n', authorization: `Bearer ${keyA}` }]);
+  assert.deepEqual(removedFiles, [`Bearer ${keyA}`]);
 });

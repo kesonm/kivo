@@ -1,10 +1,18 @@
 import http from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 
 const OPENAI_ORIGIN = 'https://api.openai.com/v1';
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 24 * 1024 * 1024;
+export const CHAT_GATEWAY_MAX_REQUEST_BYTES = 20 * 1024 * 1024;
+export const CHAT_GATEWAY_MAX_EVENT_BYTES = 20 * 1024 * 1024;
+const CHAT_MAX_RESPONSE_BYTES = 48 * 1024 * 1024;
+const CHAT_MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
+const CHAT_MAX_FILES = 8;
+const CHAT_TOOLS = new Set(['web_search', 'image_generation', 'code_interpreter']);
+const FILE_ID = /^file-[A-Za-z0-9_-]{1,128}$/;
+const MIME = /^(?:application|text|image)\/[a-z0-9.+-]{1,100}$/;
 const REQUEST_FIELDS = ['model', 'input', 'instructions', 'parallel_tool_calls', 'reasoning', 'text', 'tool_choice', 'tools', 'truncation'];
 const INPUT_TYPES = new Set(['message', 'function_call', 'function_call_output', 'custom_tool_call', 'custom_tool_call_output', 'reasoning', 'additional_tools', 'configuration_update']);
 const safeTool = tool => tool && (['function', 'custom'].includes(tool.type)
@@ -17,7 +25,7 @@ const schemaSummary = item => {
 const isTextOutput = output => typeof output === 'string' || (Array.isArray(output) && output.every(part => ['input_text', 'output_text'].includes(part?.type) && typeof part.text === 'string'));
 
 export class GatewayError extends Error {
-  constructor(message, status = 400) { super(message); this.status = status; }
+  constructor(message, status = 400, diagnostic) { super(message); this.status = status; this.diagnostic = diagnostic; }
 }
 
 function sendError(res, status, message) {
@@ -27,23 +35,71 @@ function sendError(res, status, message) {
   res.end(JSON.stringify({ error: { message, type: 'codex_workspace_error', code: `workspace_${status}` } }));
 }
 
-async function readJson(req) {
+async function readJson(req, maxBytes) {
   const chunks = []; let length = 0;
   for await (const chunk of req) {
     length += chunk.length;
-    if (length > MAX_REQUEST_BYTES) throw new GatewayError('请求上下文过大，请新建会话。', 413);
+    if (length > maxBytes) throw new GatewayError('请求上下文或附件过大，请减少附件或新建会话。', 413);
     chunks.push(chunk);
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
   catch { throw new GatewayError('无效 JSON 请求。'); }
 }
 
-/** Only text and locally executed function/custom tools are supported in this release.
- * Provider-side sessions, hosted tools and remote file IDs must not cross user boundaries. */
-export function prepareResponseRequest(body, config) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new GatewayError('无效模型请求。');
-  if (body.previous_response_id || body.conversation || body.background) throw new GatewayError('不支持跨请求的供应商会话引用。');
-  if (body.input == null || (typeof body.input !== 'string' && !Array.isArray(body.input))) throw new GatewayError('缺少模型输入。');
+function validFilename(name) {
+  return typeof name === 'string' && name !== '.' && name !== '..' && name.length > 0
+    && name.length <= 200 && !/[\x00-\x1f\x7f/\\]/.test(name);
+}
+
+function validDataUrl(value, acceptsMime) {
+  if (typeof value !== 'string' || value.length > CHAT_GATEWAY_MAX_REQUEST_BYTES) return false;
+  const separator = value.indexOf(';base64,');
+  if (!value.startsWith('data:') || separator < 6 || !acceptsMime(value.slice(5, separator))) return false;
+  const data = value.slice(separator + 8);
+  return data.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(data);
+}
+
+function prepareChatInput(input) {
+  if (typeof input === 'string') return input;
+  return input.map(item => {
+    if (!item || !['user', 'assistant'].includes(item.role) || (item.type && item.type !== 'message')) throw new GatewayError('不支持的聊天消息。');
+    const { role, content } = item;
+    if (typeof content === 'string') return { role, content };
+    if (!Array.isArray(content) || role !== 'user') throw new GatewayError('不支持的聊天内容。');
+    return { role, content: content.map(part => {
+      if (part?.type === 'input_text' && typeof part.text === 'string') return { type: part.type, text: part.text };
+      if (part?.type === 'input_image' && validDataUrl(part.image_url, mime => /^image\/(png|jpeg|webp|gif)$/.test(mime))) {
+        return { type: part.type, image_url: part.image_url, detail: 'auto' };
+      }
+      if (part?.type === 'input_file' && validFilename(part.filename) && validDataUrl(part.file_data, mime => MIME.test(mime))) {
+        return { type: part.type, filename: part.filename, file_data: part.file_data };
+      }
+      throw new GatewayError('聊天附件必须是受支持的内联文件。');
+    }) };
+  });
+}
+
+function prepareChatPayload(body, chatTools) {
+  const tools = body.tools ?? [];
+  if (!Array.isArray(tools) || tools.some(tool => !CHAT_TOOLS.has(tool?.type) || !chatTools.has(tool.type))
+    || new Set(tools.map(tool => tool.type)).size !== tools.length) {
+    throw new GatewayError('聊天请求包含未授权的工具。');
+  }
+  const toolChoice = body.tool_choice ?? 'auto';
+  const chosenType = toolChoice?.type;
+  if (!['auto', 'none'].includes(toolChoice) && !tools.some(tool => tool.type === chosenType)) {
+    throw new GatewayError('聊天请求选择了未启用的工具。');
+  }
+  return {
+    input: prepareChatInput(body.input),
+    instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
+    tools: tools.map(({ type }) => type === 'code_interpreter' ? { type, container: { type: 'auto' } } : { type }),
+    tool_choice: tools.length ? (chosenType ? { type: chosenType } : toolChoice) : undefined,
+  };
+}
+
+/** Runner capabilities only accept text and tools executed in their isolated workspace. */
+function prepareRunnerPayload(body) {
   if (Array.isArray(body.input)) for (const item of body.input) {
     if (!item || typeof item !== 'object' || !INPUT_TYPES.has(item.type || (item.role ? 'message' : ''))) throw new GatewayError(`此版本只支持文本和项目内工具（${schemaSummary(item)}）。`);
     // Codex 0.167 can put tool declarations in its input history instead of the
@@ -57,12 +113,20 @@ export function prepareResponseRequest(body, config) {
   if (body.tools != null && (!Array.isArray(body.tools) || body.tools.some(t => !safeTool(t)))) throw new GatewayError(`此部署仅允许隔离工作区内的工具（${Array.isArray(body.tools) ? body.tools.filter(t => !safeTool(t)).map(schemaSummary).join(' | ').slice(0,400) : 'tools 不是数组'}）。`);
   const payload = {};
   for (const key of REQUEST_FIELDS) if (body[key] !== undefined) payload[key] = body[key];
+  return payload;
+}
+
+export function prepareResponseRequest(body, config, chatTools) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new GatewayError('无效模型请求。');
+  if (body.previous_response_id || body.conversation || body.background) throw new GatewayError('不支持跨请求的供应商会话引用。');
+  if (body.input == null || (typeof body.input !== 'string' && !Array.isArray(body.input))) throw new GatewayError('缺少模型输入。');
+  const payload = chatTools ? prepareChatPayload(body, chatTools) : prepareRunnerPayload(body);
   payload.model = config.model;
   payload.store = false;
   payload.stream = true;
   payload.truncation = 'disabled';
   // Encrypted reasoning is returned by the provider and replayed with the isolated thread.
-  payload.include = ['reasoning.encrypted_content'];
+  if (!chatTools) payload.include = ['reasoning.encrypted_content'];
   const configuredMax = Math.max(256, Math.min(32768, Number(config.maxOutputTokens) || 4096));
   payload.max_output_tokens = Number.isSafeInteger(body.max_output_tokens) && body.max_output_tokens > 0
     ? Math.min(body.max_output_tokens, configuredMax) : configuredMax;
@@ -70,20 +134,24 @@ export function prepareResponseRequest(body, config) {
   return payload;
 }
 
-export function makeSseParser(onEvent) {
+export function makeSseParser(onEvent, { maxEventBytes = 4 * 1024 * 1024 } = {}) {
   const decoder = new TextDecoder(); let buffer = '';
+  const boundary = /\r?\n\r?\n/g;
   return {
     feed(chunk) {
+      boundary.lastIndex = Math.max(0, buffer.length - 3);
       buffer += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
-      if (buffer.length > 4 * 1024 * 1024) throw new GatewayError('模型事件超出大小限制。', 502);
       let match;
-      while ((match = /\r?\n\r?\n/.exec(buffer))) {
+      while ((match = boundary.exec(buffer))) {
+        if (match.index > maxEventBytes) throw new GatewayError('模型事件超出大小限制。', 502);
         const frame = buffer.slice(0, match.index); buffer = buffer.slice(match.index + match[0].length);
+        boundary.lastIndex = 0;
         const data = frame.split(/\r?\n/).filter(l => l.startsWith('data:')).map(l => l.slice(5).trimStart()).join('\n');
         if (!data || data === '[DONE]') continue;
         let event; try { event = JSON.parse(data); } catch { throw new GatewayError('供应商返回无效流式事件。', 502); }
         onEvent(event);
       }
+      if (buffer.length > maxEventBytes + 3) throw new GatewayError('模型事件超出大小限制。', 502);
     },
   };
 }
@@ -94,15 +162,129 @@ export function parseUsage(usage) {
   return { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, totalTokens: usage.total_tokens };
 }
 
-export function createGateway({ store, config, onStatus = () => {}, fetchImpl = globalThis.fetch }) {
+const NETWORK_CODES = new Map([
+  ['ENOTFOUND', 'dns'], ['EAI_AGAIN', 'dns'],
+  ['ECONNRESET', 'connection'], ['ECONNREFUSED', 'connection'], ['EPIPE', 'connection'],
+  ['ENETUNREACH', 'connection'], ['EHOSTUNREACH', 'connection'], ['UND_ERR_SOCKET', 'connection'],
+  ['ETIMEDOUT', 'timeout'], ['UND_ERR_CONNECT_TIMEOUT', 'timeout'],
+  ['UND_ERR_HEADERS_TIMEOUT', 'timeout'], ['UND_ERR_BODY_TIMEOUT', 'timeout'],
+  ['UND_ERR_PRX_TLS', 'tls'], ['ERR_SSL_WRONG_VERSION_NUMBER', 'tls'],
+  ['ERR_TLS_CERT_ALTNAME_INVALID', 'tls'], ['CERT_HAS_EXPIRED', 'tls'],
+  ['DEPTH_ZERO_SELF_SIGNED_CERT', 'tls'], ['SELF_SIGNED_CERT_IN_CHAIN', 'tls'],
+  ['UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'tls'],
+]);
+const PROVIDER_MESSAGES = new Map([
+  ['invalid_api_key', '你的 OpenAI API 密钥无效或已失效，请在个人设置中更新。'],
+  ['insufficient_quota', '你的 OpenAI API 账户额度不足，请检查账户余额和项目预算。'],
+  ['billing_hard_limit_reached', '你的 OpenAI API 账户已达到预算上限，请检查账单设置。'],
+  ['rate_limit_exceeded', 'OpenAI 调用频率已达上限，请稍后重试。'],
+  ['model_not_found', '当前 OpenAI API 密钥无法访问所选模型，请检查项目的模型权限。'],
+  ['unsupported_country_region_territory', 'OpenAI 拒绝了当前服务出口所在地区，请联系 kivo 管理员。'],
+  ['organization_verification_required', '请先在 OpenAI 平台完成组织验证，再使用此工具。'],
+  ['content_policy_violation', 'OpenAI 的内容规则拦截了本次请求，请调整内容后重试。'],
+]);
+
+async function smallJson(response) {
+  try {
+    const chunks = []; let length = 0;
+    for await (const chunk of response.body ?? []) {
+      length += chunk.length;
+      if (length > 16 * 1024) return null;
+      chunks.push(chunk);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch { return null; }
+}
+
+function providerRequestId(response) {
+  const id = response.headers.get('x-request-id');
+  return /^req_[a-f0-9]{16,64}$/i.test(id ?? '') ? id : undefined;
+}
+
+function providerFailure(details, status, requestId, stage) {
+  const code = [details?.code, details?.type].find(value => PROVIDER_MESSAGES.has(value));
+  const diagnostic = { category: 'provider', providerStatus: status, providerCode: code, providerRequestId: requestId };
+  const message = PROVIDER_MESSAGES.get(code)
+    ?? (status === 401 ? PROVIDER_MESSAGES.get('invalid_api_key')
+      : status === 403 ? 'OpenAI 拒绝了本次请求，请检查 API 项目权限或组织验证状态。'
+      : status === 429 ? 'OpenAI API 额度或调用频率受限，请检查账单或稍后重试。'
+      : status >= 500 ? 'OpenAI 服务暂时异常，请稍后重试。'
+      : stage === 'upload' ? `OpenAI 未能接收分析附件（HTTP ${status}）。`
+      : status ? `OpenAI 拒绝了模型请求（HTTP ${status}）。`
+      : 'OpenAI 未能完成本次工具或模型调用。');
+  return new GatewayError(message, 502, diagnostic);
+}
+
+function transportFailure(error, controller, stage) {
+  const reason = controller?.signal.reason?.name;
+  if (reason === 'TimeoutError') return new GatewayError('等待 OpenAI 响应超时，请稍后重试。', 504, { category: 'timeout' });
+  if (reason === 'AbortError' || error?.name === 'AbortError') return new GatewayError('模型调用已取消。', 502, { category: 'cancelled' });
+  const networkCode = [error?.cause?.code, error?.code].find(code => NETWORK_CODES.has(code));
+  const category = NETWORK_CODES.get(networkCode);
+  const message = category === 'dns' ? '服务器暂时无法解析 OpenAI 地址，请稍后重试。'
+    : category === 'tls' ? '服务器无法与 OpenAI 建立加密连接，请联系 kivo 管理员。'
+    : category === 'timeout' ? '连接 OpenAI 超时，请稍后重试。'
+    : stage === 'stream' ? '与 OpenAI 的连接在回复过程中中断，请稍后重试。'
+    : category === 'connection' || stage === 'request' || stage === 'upload' ? '服务器暂时无法连接 OpenAI，请稍后重试。'
+    : '模型网关处理请求时发生错误，请稍后重试。';
+  return new GatewayError(message, 502, { category: category ?? 'unexpected', networkCode });
+}
+
+function validateChatFiles(chatFiles) {
+  if (!Array.isArray(chatFiles) || chatFiles.length > CHAT_MAX_FILES) throw new GatewayError('附件数量超出限制。');
+  let total = 0;
+  return chatFiles.map(file => {
+    if (!validFilename(file?.name) || typeof file.mimeType !== 'string' || !MIME.test(file.mimeType)
+      || !Buffer.isBuffer(file.data) || !file.data.length) throw new GatewayError('分析附件无效。');
+    total += file.data.length;
+    if (total > CHAT_MAX_UPLOAD_BYTES) throw new GatewayError('分析附件超出大小限制。', 413);
+    return { name: file.name, mimeType: file.mimeType, data: file.data };
+  });
+}
+
+export function createGateway({ store, config, onStatus = () => {}, fetchImpl = globalThis.fetch, report = entry => console.error(JSON.stringify(entry)) }) {
   const capabilities = new Map();
   const activeRequests = new Set();
   let server, listening;
 
-  function authorizeRun({ id, userId }) {
+  function authorizeRun({ id, userId, chatTools, chatFiles = [] }) {
+    if (chatTools !== undefined && (!Array.isArray(chatTools) || chatTools.some(type => !CHAT_TOOLS.has(type)))) {
+      throw new GatewayError('无效的聊天工具权限。');
+    }
+    const files = validateChatFiles(chatFiles);
+    if (files.length && !chatTools?.includes('code_interpreter')) throw new GatewayError('未启用文件分析工具。');
     const token = randomBytes(32).toString('base64url');
-    capabilities.set(token, { runId: id, userId, expires: Date.now() + (config.runTimeoutMs || 20 * 60_000) + 60_000, inFlight: false, requestCount: 0, controllers: new Set(), tasks: new Set() });
+    capabilities.set(token, { runId: id, userId, chatTools: chatTools && new Set(chatTools), chatFiles: files, expires: Date.now() + (config.runTimeoutMs || 20 * 60_000) + 60_000, inFlight: false, requestCount: 0, controllers: new Set(), tasks: new Set() });
     return token;
+  }
+
+  async function uploadChatFile(file, authorization, signal) {
+    const body = new FormData();
+    body.set('purpose', 'user_data');
+    // Bound retention even if the upload succeeds but its response is lost.
+    body.set('expires_after[anchor]', 'created_at');
+    body.set('expires_after[seconds]', '3600');
+    body.set('file', new Blob([file.data], { type: file.mimeType }), file.name);
+    const response = await fetchImpl(`${OPENAI_ORIGIN}/files`, { method: 'POST', headers: { authorization }, body, signal, redirect: 'error' });
+    const result = await smallJson(response);
+    const requestId = providerRequestId(response);
+    if (!response.ok) throw providerFailure(result?.error, response.status, requestId, 'upload');
+    if (typeof result?.id !== 'string' || !FILE_ID.test(result.id)) throw new GatewayError('OpenAI 未返回有效的附件标识。', 502, { category: 'protocol', providerRequestId: requestId });
+    return result.id;
+  }
+
+  async function removeChatFiles(ids, authorization, runId) {
+    if (!ids.length) return;
+    const signal = AbortSignal.timeout(5_000);
+    await Promise.all(ids.map(async id => {
+      try {
+        const response = await fetchImpl(`${OPENAI_ORIGIN}/files/${id}`, { method: 'DELETE', headers: { authorization }, signal, redirect: 'error' });
+        await response.body?.cancel().catch(() => {});
+        if (!response.ok && response.status !== 404) report({ event: 'model_gateway_file_cleanup_failed', runId, providerStatus: response.status, providerRequestId: providerRequestId(response) });
+      } catch {
+        report({ event: 'model_gateway_file_cleanup_failed', runId });
+      }
+    }));
   }
 
   function revokeRun(runId) {
@@ -115,25 +297,39 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
     return Promise.allSettled(draining);
   }
 
-  async function handle(req, res) {
+  async function handle(req, res, external = false) {
     let cap, usageId, upstreamStarted = false, settled = false, controller, ownsLock = false;
+    let stage = 'validation', requestId, authorization;
+    const uploadedFileIds = [];
     const settle = (usage, status) => {
       if (!usageId || settled) return;
       store.settleUsage(usageId, { ...usage, model: config.model, status });
       settled = true;
     };
+    const markUnknownUsage = () => {
+      settle({ inputTokens: null, outputTokens: null, totalTokens: null }, 'unknown');
+      onStatus(cap.runId, '供应商未返回完整用量，已标记为未知；请以你的 OpenAI 账单为准。');
+    };
+    const reportFailure = (diagnostic) => {
+      if (diagnostic.category !== 'cancelled') report({ event: 'model_gateway_failure', runId: cap?.runId, stage, providerRequestId: requestId, ...diagnostic });
+    };
     try {
       const rawToken = /^Bearer ([A-Za-z0-9_-]{40,60})$/.exec(req.headers.authorization || '')?.[1];
       cap = rawToken && capabilities.get(rawToken);
       if (!cap || cap.expires < Date.now()) throw new GatewayError('工作任务凭据已失效。', 401);
+      if (cap.chatTools && (external || !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress))) {
+        throw new GatewayError('此凭据仅供站内聊天使用。', 403);
+      }
       const user = store.getUser(cap.userId);
       if (!user || user.disabled) throw new GatewayError('账号已停用。', 403);
       if (req.method !== 'POST' || req.url !== '/v1/responses') throw new GatewayError('不支持的模型接口。', 404);
       if (req.headers.origin) throw new GatewayError('模型网关不接受浏览器请求。', 403);
       if (cap.inFlight) throw new GatewayError('同一任务已有模型请求在运行。', 429);
-      if (++cap.requestCount > 80) throw new GatewayError('单任务模型调用次数已达限制，请继续新的任务。', 429);
+      if (++cap.requestCount > (cap.chatTools ? 1 : 80)) throw new GatewayError('单任务模型调用次数已达限制，请继续新的任务。', 429);
       cap.inFlight = true; ownsLock = true;
-      const payload = prepareResponseRequest(await readJson(req), config);
+      const body = await readJson(req, cap.chatTools ? CHAT_GATEWAY_MAX_REQUEST_BYTES : MAX_REQUEST_BYTES);
+      const payload = prepareResponseRequest(body, config, cap.chatTools);
+      if (cap.chatTools) payload.safety_identifier = createHash('sha256').update(`kivo-user:${cap.userId}`).digest('hex');
       // Resolve credentials only from the capability-bound user. The runner
       // receives this capability, never a real key or a global fallback key.
       const currentUser = store.getUser(cap.userId);
@@ -142,25 +338,41 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       if (!apiKey) throw new GatewayError('请先在个人设置中填写你的 OpenAI API 密钥。', 409);
       if (!capabilities.has(rawToken)) throw new GatewayError('任务已取消。', 409);
       controller = new AbortController(); cap.controllers.add(controller);
-      const timeout = setTimeout(() => controller.abort(), config.upstreamTimeoutMs || 180_000); timeout.unref();
+      const timeout = setTimeout(() => controller.abort(new DOMException('OpenAI request timed out', 'TimeoutError')), config.upstreamTimeoutMs || 180_000); timeout.unref();
       controller.signal.addEventListener('abort', () => clearTimeout(timeout), { once: true });
       try {
-        const headers = { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' };
+        authorization = `Bearer ${apiKey}`;
+        const headers = { authorization, 'content-type': 'application/json' };
+        if (cap.chatFiles.length) {
+          const interpreter = payload.tools.find(tool => tool.type === 'code_interpreter');
+          if (!interpreter) throw new GatewayError('分析附件需要启用文件分析工具。');
+          stage = 'upload';
+          onStatus(cap.runId, '正在准备文件分析附件…');
+          for (const file of cap.chatFiles) uploadedFileIds.push(await uploadChatFile(file, authorization, controller.signal));
+          controller.signal.throwIfAborted();
+          const account = store.getUser(cap.userId);
+          if (!account || account.disabled) throw new GatewayError('账号已停用。', 403);
+          if (store.getUserApiKey(cap.userId) !== apiKey) throw new GatewayError('API 密钥已更新，请重新发送。', 409);
+          interpreter.container.file_ids = uploadedFileIds;
+        }
+        stage = 'request';
         usageId = store.beginUsage(cap.userId, cap.runId, { model: config.model, keyLast4: apiKey.slice(-4) });
         onStatus(cap.runId, '正在使用你保存的 OpenAI API 密钥调用模型…');
         upstreamStarted = true;
         const upstream = await fetchImpl(`${OPENAI_ORIGIN}/responses`, {
           method: 'POST', headers, body: JSON.stringify(payload), signal: controller.signal, redirect: 'error',
         });
+        requestId = providerRequestId(upstream);
         if (!upstream.ok) {
-          await upstream.body?.cancel();
           if (upstream.status >= 400 && upstream.status < 500) settle({ inputTokens: null, outputTokens: null, totalTokens: null }, 'failed');
-          const message = upstream.status === 401 ? '你的 OpenAI API 密钥无效或已失效，请在个人设置中更新。'
-            : upstream.status === 429 ? '你的 OpenAI 账户额度或调用速率受限，请检查 OpenAI 账户后重试。'
-            : `OpenAI 请求失败（HTTP ${upstream.status}）。`;
-          throw new GatewayError(message, 502);
+          const details = await smallJson(upstream);
+          throw providerFailure(details?.error, upstream.status, requestId, stage);
         }
-        if (!upstream.headers.get('content-type')?.includes('text/event-stream') || !upstream.body) throw new GatewayError('OpenAI 未返回预期的流式响应。', 502);
+        if (!upstream.headers.get('content-type')?.includes('text/event-stream') || !upstream.body) {
+          await upstream.body?.cancel().catch(() => {});
+          throw new GatewayError('OpenAI 未返回预期的流式响应。', 502, { category: 'protocol' });
+        }
+        stage = 'stream';
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-store', 'x-accel-buffering': 'no' });
         let bytes = 0, terminal = false;
         const frames = [];
@@ -175,39 +387,51 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
           }
           // Provider error bodies can contain credential fragments or internal
           // details. Preserve protocol shape while forwarding only safe text.
-          const safeError = { code: 'workspace_upstream_error', message: 'OpenAI 模型请求未能完成，请检查个人 API 设置或稍后重试。' };
-          if (event.type === 'error') event = { type: 'error', ...safeError };
-          else {
+          if (event.type === 'error' || event.type === 'response.failed' || event.error || event.response?.error) {
+            const error = providerFailure(event.response?.error ?? event.error ?? event, undefined, requestId, stage);
+            const safeError = { code: 'workspace_upstream_error', message: error.message };
+            reportFailure(error.diagnostic);
+            if (event.type === 'error') {
+              terminal = true;
+              event = { type: 'error', ...safeError };
+            }
             if (event.error) event = { ...event, error: safeError };
-            if (event.response?.error) event = { ...event, response: { ...event.response, error: safeError } };
+            if (event.type === 'response.failed' || event.response?.error) event = { ...event, response: { ...event.response, error: safeError } };
           }
           frames.push(`data: ${JSON.stringify(event)}\n\n`);
-        });
+        }, cap.chatTools ? { maxEventBytes: CHAT_GATEWAY_MAX_EVENT_BYTES } : undefined);
         // Drain even after the browser/runner disconnects, so a normal completed
         // response can still have its actual usage recorded. Cancellation aborts it.
         for await (const chunk of upstream.body) {
           bytes += chunk.length;
-          if (bytes > MAX_RESPONSE_BYTES) throw new GatewayError('模型输出超出大小限制。', 502);
+          if (bytes > (cap.chatTools ? CHAT_MAX_RESPONSE_BYTES : MAX_RESPONSE_BYTES)) throw new GatewayError('模型输出超出大小限制。', 502);
           parser.feed(chunk);
           const output = frames.splice(0).join('');
           if (output && !res.destroyed && !res.writableEnded && !res.write(output)) {
-            await Promise.race([once(res, 'drain'), once(res, 'close')]);
+            const waiting = new AbortController();
+            const options = { signal: AbortSignal.any([waiting.signal, controller.signal]) };
+            try { await Promise.race([once(res, 'drain', options), once(res, 'close', options)]); }
+            finally { waiting.abort(); }
           }
         }
-        if (!terminal || !settled) throw new GatewayError('模型连接结束，但未收到实际用量；已标记为未知，请以你的 OpenAI 账单为准。', 502);
+        if (!terminal) throw new GatewayError('与 OpenAI 的连接提前结束，未收到完整回复。', 502, { category: 'incomplete_stream' });
+        if (!settled) markUnknownUsage();
         res.end();
       } finally { clearTimeout(timeout); }
     } catch (error) {
       if (usageId && !settled) {
-        if (upstreamStarted) {
-          settle({ inputTokens: null, outputTokens: null, totalTokens: null }, 'unknown');
-          onStatus(cap.runId, '供应商未返回完整用量，已标记为未知；请以你的 OpenAI 账单为准。');
-        } else settle({ inputTokens: null, outputTokens: null, totalTokens: null }, 'failed');
+        if (upstreamStarted) markUnknownUsage();
+        else settle({ inputTokens: null, outputTokens: null, totalTokens: null }, 'failed');
       }
-      const message = error.name === 'AbortError' ? '模型调用已取消或超时。' : error instanceof GatewayError ? error.message : '模型网关暂不可用，请稍后重试。';
-      if (cap) onStatus(cap.runId, message);
-      sendError(res, error instanceof GatewayError ? error.status : 502, message);
+      const failure = error instanceof GatewayError ? error : transportFailure(error, controller, stage);
+      if (failure.diagnostic) reportFailure(failure.diagnostic);
+      else if (stage === 'stream') reportFailure({ category: 'protocol' });
+      if (cap) onStatus(cap.runId, failure.message);
+      if (cap?.chatTools && res.headersSent && !res.destroyed && !res.writableEnded) {
+        res.end(`data: ${JSON.stringify({ type: 'error', code: 'workspace_upstream_error', message: failure.message })}\n\n`);
+      } else sendError(res, failure.status, failure.message);
     } finally {
+      await removeChatFiles(uploadedFileIds, authorization, cap?.runId);
       if (cap) { if (ownsLock) cap.inFlight = false; if (controller) cap.controllers.delete(controller); }
     }
   }
@@ -218,7 +442,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       const token = /^Bearer ([A-Za-z0-9_-]{40,60})$/.exec(req.headers.authorization || '')?.[1];
       const cap = token && capabilities.get(token);
       req.url = '/v1/responses';
-      const task = handle(req, res).catch(() => sendError(res, 500, '模型网关内部错误。'));
+      const task = handle(req, res, true).catch(() => sendError(res, 500, '模型网关内部错误。'));
       activeRequests.add(task); cap?.tasks.add(task);
       task.finally(() => { activeRequests.delete(task); cap?.tasks.delete(task); });
       return task;

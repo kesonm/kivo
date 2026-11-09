@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import ReactMarkdown from 'react-markdown';
 import { api, dateTime, enc, messageOf } from './api';
+import { AttachmentChips, ChatImages, Markdown } from './ChatContent';
 import { Icon, Logo } from './icons';
 import { getDirtyFile } from './navigation';
 import { Files } from './Files';
 import { LocalApprovals } from './Local';
 import { ErrorBox, Loading, StatusBadge, useDialog, useNotice } from './ui';
-import type { Message, Project, Run, Thread, User } from './types';
+import type { ChatTool, Message, Project, Run, Thread, User } from './types';
 
-function Markdown({ content }: { content: string }) {
-  return <div className="markdown"><ReactMarkdown components={{ a: ({ children, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer">{children}</a> }}>{content}</ReactMarkdown></div>;
-}
+const chatFileExtensions = ['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.txt', '.md', '.csv', '.tsv', '.json', '.xlsx', '.docx', '.pptx'];
+const chatFileCount = 4;
+const chatFileBytes = 8 * 1024 * 1024;
+const chatModes = [
+  { tool: 'image', icon: 'image', label: '生成图片', placeholder: '描述你想生成的图片' },
+  { tool: 'search', icon: 'search', label: '联网搜索', placeholder: '你想从网上查找什么？' },
+] as const;
 const starters = [
   { icon: 'code', title: '从零构建', text: '帮我创建一个简洁的项目起始结构，并说明如何运行。' },
   { icon: 'search', title: '了解项目', text: '阅读这个项目，梳理目录结构、主要功能和可以改进的地方。' },
@@ -34,6 +38,8 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [input, setInput] = useState('');
+  const [selectedTool, setSelectedTool] = useState<Exclude<ChatTool, 'analyze'>>('auto');
+  const [attachments, setAttachments] = useState<File[]>([]);
   const [error, setError] = useState('');
   const [connectionLost, setConnectionLost] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
@@ -42,6 +48,7 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const [scrolledUp, setScrolledUp] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const pinBottom = useRef(true);
   const threadRef = useRef(threadId); threadRef.current = threadId;
   const newlyCreatedThread = useRef<string | null>(null);
@@ -50,6 +57,8 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const sendingRef = useRef(false);
   const notify = useNotice(); const ask = useDialog();
   const running = run?.status === 'running';
+  const composerBusy = loading || sending || running;
+  const chatTool = attachments.length ? 'analyze' : selectedTool;
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; ++loadSequence.current; };
@@ -66,7 +75,11 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   }, []);
   useEffect(() => {
     pinBottom.current = true; setError(''); setConnectionLost(false);
-    if (threadId !== newlyCreatedThread.current) setInput('');
+    if (threadId !== newlyCreatedThread.current) {
+      setInput('');
+      setAttachments([]);
+      setSelectedTool('auto');
+    }
     newlyCreatedThread.current = null; setRun(null); setMessages([]); setTitle('新的对话');
     if (threadId) void loadThread(threadId, true);
     else { ++loadSequence.current; setLoading(false); }
@@ -107,15 +120,32 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
     };
     return () => { finished = true; source.close(); };
   }, [run?.id, run?.status, loadThread, onThreadsChanged, refreshSession, notify]);
-  useEffect(() => {
+  const followOutput = useCallback(() => {
     if (pinBottom.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
-  }, [messages, run?.output, run?.logs?.length, loading]);
+  }, []);
+  useEffect(followOutput, [followOutput, messages, run?.output, run?.logs?.length, loading]);
   useEffect(() => { if (textarea.current) { textarea.current.style.height = 'auto'; textarea.current.style.height = `${Math.min(160, textarea.current.scrollHeight)}px`; } }, [input]);
+
+  function attachFiles(selection: FileList | null) {
+    const files = Array.from(selection ?? []);
+    if (!files.length) return;
+    const invalid = files.find(file => !file.size || !chatFileExtensions.some(ext => file.name.toLowerCase().endsWith(ext)));
+    if (invalid) { notify(`无法使用附件「${invalid.name}」。请选择非空的文档、表格、文本或图片。`, 'error'); return; }
+    const next = [...attachments, ...files];
+    if (next.length > chatFileCount || next.reduce((sum, file) => sum + file.size, 0) > chatFileBytes) {
+      notify('每条消息最多添加 4 个附件，总大小不超过 8 MB。', 'error');
+      return;
+    }
+    setAttachments(next);
+    setSelectedTool('auto');
+    textarea.current?.focus();
+  }
 
   async function send(event?: FormEvent) {
     event?.preventDefault();
     const text = input.trim();
-    if (!text || sendingRef.current || loading || running || !providerConfigured) return;
+    const hasFiles = !project && attachments.length > 0;
+    if ((!text && !hasFiles) || sendingRef.current || loading || running || !providerConfigured) return;
     sendingRef.current = true; setSending(true);
     try {
       if (project && getDirtyFile() && !await ask({ title: '使用已保存的文件开始任务？', description: `${getDirtyFile()} 尚有未保存的编辑。kivo 将使用${project.location === 'local' ? '电脑' : '服务器'}上已保存的文件版本。你也可以取消并先保存文件。`, confirm: '使用已保存的版本' })) return;
@@ -123,15 +153,24 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       setError(''); pinBottom.current = true;
       let id = threadId;
       if (!id) {
-        const created = await api<{ thread: Thread }>(project ? `/api/projects/${enc(project.id)}/threads` : '/api/threads', { method: 'POST', body: { title: text.slice(0, 60) } });
+        const created = await api<{ thread: Thread }>(project ? `/api/projects/${enc(project.id)}/threads` : '/api/threads', { method: 'POST', body: { title: text.slice(0, 60) || '分析附件' } });
         id = created.thread.id;
         if (mounted.current) { threadRef.current = id; newlyCreatedThread.current = id; }
         onThreadCreated(created.thread);
       }
-      const result = await api<{ run: Run }>(`/api/threads/${enc(id)}/turns`, { method: 'POST', body: { text } });
+      let body: { text: string; tool?: ChatTool } | FormData = project ? { text } : { text, tool: chatTool };
+      if (hasFiles) {
+        const form = new FormData();
+        form.set('text', text);
+        form.set('tool', 'analyze');
+        for (const file of attachments) form.append('files', file);
+        body = form;
+      }
+      const result = await api<{ run: Run }>(`/api/threads/${enc(id)}/turns`, { method: 'POST', body });
       onThreadsChanged();
       if (!mounted.current || threadRef.current !== id) return;
-      setInput(''); setRun(result.run); await loadThread(id); void refreshSession().catch(() => undefined);
+      setInput(''); setAttachments([]); setSelectedTool('auto'); setRun(result.run);
+      await loadThread(id); void refreshSession().catch(() => undefined);
     } catch (e) { if (mounted.current) setError(messageOf(e)); else onThreadsChanged(); }
     finally { sendingRef.current = false; if (mounted.current) { setSending(false); textarea.current?.focus(); } }
   }
@@ -154,18 +193,34 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const lastAssistant = [...messages].reverse().find(message => message.role === 'assistant');
   const showRunOutput = run && (running || (!!run.output && lastAssistant?.content !== run.output));
   const emptyConversation = !loading && messages.length === 0 && !running;
+  const chatPlaceholder = chatTool === 'analyze' ? '你想了解附件中的哪些内容？' : chatModes.find(mode => mode.tool === chatTool)?.placeholder;
   const composer = <div className="composer-area">
     {scrolledUp && !emptyConversation && <button className="scroll-bottom" onClick={() => { pinBottom.current = true; scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: 'smooth' }); }}><Icon name="down" size={16} />回到最新消息</button>}
     {connectionLost && <div className="connection-note"><span className="spinner" />连接已断开，正在自动恢复任务状态…</div>}
     {error && <ErrorBox error={error} onRetry={threadId ? () => void loadThread(threadId, true) : undefined} />}
     <form className={'composer' + (project ? '' : ' composer-chat') + (running ? ' composer-running' : '')} onSubmit={send}>
+      {!project && attachments.length > 0 && <AttachmentChips files={attachments} disabled={composerBusy} onRemove={index => setAttachments(files => files.filter((_, i) => i !== index))} />}
       <div className="composer-input-row">
         {project && <button type="button" className="icon-button composer-attach" title="项目文件、上传与代码差异" aria-label="打开项目文件" onClick={() => void changePanel(true)}><Icon name="plus" size={23} /></button>}
         {!project && <button type="button" className="icon-button composer-attach" title="打开本地文件夹开始项目对话" aria-label="打开本地文件夹" disabled={running || sending} onClick={onOpenLocal}><Icon name="folder" size={21} /></button>}
-        <textarea ref={textarea} value={input} onChange={event => setInput(event.target.value)} placeholder={running ? 'kivo 正在执行任务…' : '有问题，尽管问'} aria-label="发送给 kivo 的消息" disabled={loading || sending || running} maxLength={24000} rows={1} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
+        <textarea ref={textarea} value={input} onChange={event => setInput(event.target.value)} placeholder={running ? 'kivo 正在执行任务…' : chatPlaceholder || '有问题，尽管问'} aria-label="发送给 kivo 的消息" disabled={composerBusy} maxLength={24000} rows={1} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
         <span className="composer-model" title="当前模型">{model || '默认模型'}</span>
-        {running ? <button type="button" className="send-button stop-button" title="停止任务" aria-label="停止任务" disabled={stopping} onClick={() => void interrupt()}>{stopping ? <span className="spinner" /> : <Icon name="stop" size={17} />}</button> : <button type="submit" className="send-button" title="发送消息" aria-label="发送消息" disabled={!input.trim() || sending || loading || !providerConfigured}>{sending ? <span className="spinner" /> : <Icon name="send" size={21} />}</button>}
+        {running ? <button type="button" className="send-button stop-button" title="停止任务" aria-label="停止任务" disabled={stopping} onClick={() => void interrupt()}>{stopping ? <span className="spinner" /> : <Icon name="stop" size={17} />}</button> : <button type="submit" className="send-button" title="发送消息" aria-label="发送消息" disabled={(!input.trim() && (project !== null || !attachments.length)) || composerBusy || !providerConfigured}>{sending ? <span className="spinner" /> : <Icon name="send" size={21} />}</button>}
       </div>
+      {!project && <div className="composer-chat-tools" role="group" aria-label="本条消息使用的工具">
+        {chatModes.map(mode => <button key={mode.tool} type="button" className="chat-tool-button" aria-pressed={chatTool === mode.tool}
+          disabled={composerBusy || attachments.length > 0} onClick={() => { setSelectedTool(old => old === mode.tool ? 'auto' : mode.tool); textarea.current?.focus(); }}>
+          <Icon name={mode.icon} size={15} />{mode.label}
+        </button>)}
+        <input type="file" ref={fileInput} accept={chatFileExtensions.join(',')} multiple hidden onChange={event => {
+          attachFiles(event.currentTarget.files);
+          event.currentTarget.value = '';
+        }} />
+        <button type="button" className={'chat-tool-button' + (attachments.length ? ' active' : '')} disabled={composerBusy || attachments.length >= chatFileCount}
+          title="选择最多 4 个附件，总大小不超过 8 MB" onClick={() => fileInput.current?.click()}>
+          <Icon name="file" size={15} />{attachments.length ? '添加附件' : '分析文件'}
+        </button>
+      </div>}
     </form>
     <div className="composer-footer">{project && <button type="button" className="composer-project" onClick={() => void changePanel(true)} title="查看项目文件"><Icon name="folder" size={13} /><span>{project.name}{project.location === 'local' ? ' · 本地电脑' : ' · 云端'}</span></button>}<span>管理员可查看会话与执行记录</span><span className="composer-shortcut">Shift + Enter 换行</span></div>
   </div>;
@@ -183,7 +238,25 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       <div className={'chat-stage' + (emptyConversation ? ' chat-stage-empty' : '')}>
         {emptyConversation ? <div className="chat-welcome"><h1>今天想做些什么？</h1></div> : <div className="messages-scroll" ref={scroll} onScroll={() => { if (scroll.current) { const near = scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight < 160; pinBottom.current = near; setScrolledUp(!near); } }}>
           {loading ? <Loading label="正在加载对话…" /> : <div className="messages-list">
-            {messages.map(message => <article key={message.id} className={'chat-message message-' + message.role}><div className={'message-avatar' + (message.role === 'assistant' ? ' assistant-avatar logo-container' : '')}>{message.role === 'assistant' ? <Logo /> : message.role === 'user' ? (user.displayName || user.username).slice(0, 1).toUpperCase() : <Icon name="info" size={17} />}</div><div className="message-main"><div className="message-heading"><strong>{message.role === 'assistant' ? 'kivo' : message.role === 'user' ? user.displayName || user.username : '系统'}</strong><time>{dateTime(message.createdAt)}</time>{message.role === 'assistant' && <button className="icon-button message-copy" title="复制回答" aria-label="复制回答" onClick={() => void copy(message.content)}><Icon name="copy" size={14} /></button>}</div>{message.role === 'user' ? <div className="user-message-content">{message.content}</div> : <Markdown content={message.content} />}</div></article>)}
+            {messages.map(message => <article key={message.id} className={'chat-message message-' + message.role}>
+              <div className={'message-avatar' + (message.role === 'assistant' ? ' assistant-avatar logo-container' : '')}>
+                {message.role === 'assistant' ? <Logo /> : message.role === 'user' ? (user.displayName || user.username).slice(0, 1).toUpperCase() : <Icon name="info" size={17} />}
+              </div>
+              <div className="message-main">
+                <div className="message-heading">
+                  <strong>{message.role === 'assistant' ? 'kivo' : message.role === 'user' ? user.displayName || user.username : '系统'}</strong>
+                  <time>{dateTime(message.createdAt)}</time>
+                  {message.role === 'assistant' && message.content && <button className="icon-button message-copy" title="复制回答" aria-label="复制回答" onClick={() => void copy(message.content)}><Icon name="copy" size={14} /></button>}
+                </div>
+                {message.role === 'user' ? <>
+                  {!!message.attachments?.length && <AttachmentChips files={message.attachments} />}
+                  {message.content && <div className="user-message-content">{message.content}</div>}
+                </> : <>
+                  {(message.content || !!message.citations?.length) && <Markdown content={message.content} citations={message.citations} />}
+                  {!!message.artifacts?.length && <ChatImages artifacts={message.artifacts} onLoad={followOutput} />}
+                </>}
+              </div>
+            </article>)}
             {showRunOutput && <article className="chat-message message-assistant"><div className="message-avatar assistant-avatar logo-container"><Logo /></div><div className="message-main"><div className="message-heading"><strong>kivo</strong><StatusBadge status={run.status} /></div>{run.output ? <Markdown content={run.output} /> : <div className="thinking"><span /><span /><span /><small>正在处理你的任务</small></div>}</div></article>}
             {run && run.logs?.length > 0 && <details className="tool-activity" open={running}><summary><Icon name="terminal" size={15} /><span>执行活动</span><small>{run.logs.length} 条</small><Icon name="down" size={14} /></summary><div className="tool-log">{run.logs.map((log, index) => <div key={index}><span className="tool-log-dot" /><pre>{log}</pre></div>)}</div></details>}
             {running && run && project?.location === 'local' && <LocalApprovals runId={run.id} />}

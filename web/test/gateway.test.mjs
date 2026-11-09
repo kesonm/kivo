@@ -22,11 +22,11 @@ function fakeStore() {
   };
 }
 
-async function fixture(t, fetchImpl) {
+async function fixture(t, fetchImpl, { chatTools, chatFiles, report = () => {} } = {}) {
   const store = fakeStore();
-  const gateway = createGateway({ store, config, fetchImpl });
+  const gateway = createGateway({ store, config, fetchImpl, report });
   const address = await gateway.start();
-  const token = gateway.authorizeRun({ id: 'run', userId: 'u' });
+  const token = gateway.authorizeRun({ id: 'run', userId: 'u', chatTools, chatFiles });
   t.after(() => gateway.close());
   const request = (body = { input: 'Hello' }, extra = {}) => fetch(`http://127.0.0.1:${address.port}/v1/responses`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...extra }, body: JSON.stringify(body) });
   return { store, gateway, request, address, token };
@@ -87,6 +87,20 @@ test('401 asks user to replace their key without exposing provider error body', 
   assert.ok(!body.includes('sk-test-user-u-0001')); assert.ok(!body.includes('SECRET_PROVIDER_BODY'));
   assert.equal(f.store.usage[0].status, 'failed');
   assert.equal(f.store.usage[0].totalTokens, null);
+});
+
+test('connection failures identify the upstream stage without leaking exception text', async t => {
+  const diagnostics = [];
+  const f = await fixture(t, async () => {
+    throw new TypeError('fetch failed', { cause: Object.assign(new Error('PRIVATE_TRANSPORT_DETAILS'), { code: 'ECONNRESET' }) });
+  }, { report: entry => diagnostics.push(entry) });
+  const response = await f.request();
+  assert.equal(response.status, 502);
+  assert.match(await response.text(), /无法连接 OpenAI/);
+  assert.equal(f.store.usage[0].status, 'unknown');
+  assert.equal(diagnostics[0].stage, 'request');
+  assert.equal(diagnostics[0].networkCode, 'ECONNRESET');
+  assert.doesNotMatch(JSON.stringify(diagnostics), /PRIVATE_TRANSPORT_DETAILS/);
 });
 
 test('an incomplete upstream stream records unknown usage, never an estimated charge or actual zero', async t => {
@@ -152,6 +166,56 @@ test('provider session references and paid hosted tools cannot bypass isolation'
   assert.throws(() => prepareResponseRequest({ input: [{ type: 'item_reference', id: 'other-user-item' }] }, config));
   assert.throws(() => prepareResponseRequest({ input: [{ type: 'additional_tools', role: 'system', tools: [{ type: 'web_search' }] }] }, config));
   assert.throws(() => prepareResponseRequest({ input: [{ type: 'additional_tools', role: 'system', tools: [{ type: 'namespace', name: 'bad', tools: [{ type: 'file_search' }] }] }] }, config));
+});
+
+test('chat tools are loopback-only and the gateway owns the lifecycle of analysis files', async t => {
+  const calls = [];
+  const f = await fixture(t, async (url, options) => {
+    calls.push([url, options.method]);
+    assert.equal(options.headers.authorization, 'Bearer sk-test-user-u-0001');
+    if (url.endsWith('/files')) {
+      assert.equal(options.body.get('purpose'), 'user_data');
+      assert.equal(options.body.get('expires_after[seconds]'), '3600');
+      assert.equal(options.body.get('file').name, 'report.csv');
+      assert.equal(await options.body.get('file').text(), 'x\n1\n');
+      return Response.json({ id: 'file-KivoTest' });
+    }
+    if (options.method === 'DELETE') return new Response(null, { status: 204 });
+    const payload = JSON.parse(options.body);
+    assert.deepEqual(payload.tools, [{ type: 'code_interpreter', container: { type: 'auto', file_ids: ['file-KivoTest'] } }]);
+    assert.match(payload.safety_identifier, /^[a-f0-9]{64}$/);
+    return stream([completed()]);
+  }, { chatTools: ['code_interpreter'], chatFiles: [{ name: 'report.csv', mimeType: 'text/csv', data: Buffer.from('x\n1\n') }] });
+  let status;
+  await f.gateway.handleExternal({ headers: { authorization: `Bearer ${f.token}` }, method: 'POST', socket: { remoteAddress: '127.0.0.1' } }, {
+    writeHead(value) { status = value; }, end() {},
+  });
+  assert.equal(status, 403);
+  assert.deepEqual(calls, []);
+  const response = await f.request({ input: 'Analyze report.csv', tools: [{ type: 'code_interpreter', container: { type: 'auto', file_ids: ['file-Forged'] } }] });
+  assert.equal(response.status, 200);
+  await response.text();
+  await f.gateway.revokeRun('run');
+  assert.deepEqual(calls, [
+    ['https://api.openai.com/v1/files', 'POST'],
+    ['https://api.openai.com/v1/responses', 'POST'],
+    ['https://api.openai.com/v1/files/file-KivoTest', 'DELETE'],
+  ]);
+  assert.equal(f.store.usage[0].totalTokens, 120);
+});
+
+test('chat accepts inline multimodal inputs but cannot select remote files or undeclared tools', () => {
+  const allowed = new Set(['image_generation']);
+  const input = [{ role: 'user', content: [
+    { type: 'input_text', text: 'What does this image contain?' },
+    { type: 'input_image', image_url: 'data:image/png;base64,dGVzdA==' },
+  ] }];
+  const request = prepareResponseRequest({ input, tools: [{ type: 'image_generation' }] }, config, allowed);
+  assert.equal(request.input[0].content[1].image_url, input[0].content[1].image_url);
+  assert.throws(() => prepareResponseRequest({ input, tools: [{ type: 'web_search' }] }, config, allowed), /未授权/);
+  for (const part of [{ type: 'input_image', image_url: 'https://example.invalid/image' }, { type: 'input_file', file_id: 'file-OtherUser' }]) {
+    assert.throws(() => prepareResponseRequest({ input: [{ role: 'user', content: [part] }] }, config, allowed), /内联/);
+  }
 });
 
 test('Codex input-carried tools and reasoning updates retain the local-only tool boundary', () => {

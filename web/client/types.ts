@@ -4,7 +4,14 @@ export interface User {
 }
 export interface Project { id: string; name: string; createdAt: string; updatedAt: string; location?: 'local' | 'cloud'; deviceId?: string; localPath?: string }
 export interface Thread { id: string; projectId: string | null; title: string; createdAt: string; updatedAt: string }
-export interface Message { id: string; role: 'user' | 'assistant' | 'system'; content: string; createdAt: string }
+export type ChatTool = 'auto' | 'image' | 'search' | 'analyze';
+export interface MessageAttachment { name: string; mimeType: string; size: number }
+export interface MessageArtifact extends MessageAttachment { id: string; url: string }
+export interface MessageCitation { url: string; title: string; startIndex: number; endIndex: number }
+export interface Message {
+  id: string; role: 'user' | 'assistant' | 'system'; content: string; createdAt: string;
+  attachments?: MessageAttachment[]; artifacts?: MessageArtifact[]; citations?: MessageCitation[];
+}
 export interface Run {
   id: string; threadId: string; projectId?: string | null; status: 'running' | 'completed' | 'failed' | 'interrupted';
   output: string; logs: string[]; createdAt: string; error?: string;

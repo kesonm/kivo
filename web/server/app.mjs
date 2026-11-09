@@ -10,9 +10,12 @@ import { createProjects } from './projects.mjs';
 import { loadCredentialsKey } from './credentials.mjs';
 import { createLocalBridge, localPath } from './local.mjs';
 import { createQrLogin } from './qr-login.mjs';
+import { CHAT_UPLOAD_BODY_LIMIT, readChatMultipart } from './chat-files.mjs';
 
 const scrypt=promisify(scryptCallback);
 const cookieName='cw_session';
+const chatTools=new Set(['auto','image','search','analyze']);
+const parseChatUpload=express.raw({type:'multipart/form-data',limit:CHAT_UPLOAD_BODY_LIMIT,inflate:false});
 const safeEqual=(a,b)=>typeof a==='string'&&typeof b==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const requiredText=(value,label,max=200)=>{if(typeof value!=='string'||!value.trim()||value.trim().length>max)throw new AppError(`${label}不能为空且不能超过 ${max} 个字符`);return value.trim();};
 function validPassword(password){if(typeof password!=='string'||password.length<12||password.length>128)throw new AppError('密码长度必须为 12–128 个字符');return password;}
@@ -56,6 +59,7 @@ export async function bootstrapAdmin(store,config){
 
 export function createApp({store,runtime,config,local=null,projects:createProjectsOverride}){
   const app=express();const projects=createProjectsOverride??createProjects(config);const limits=new Map();const loginFailures=new Map();
+  let uploadsInProgress=0;
   const qrLogin=createQrLogin(store,config.publicOrigin||'https://kivo.iptnet.xyz');
   const dummyHash='scrypt$16384$8$1$00000000000000000000000000000000$'+'00'.repeat(64);
   app.disable('x-powered-by');app.set('trust proxy',config.trustProxy??false);
@@ -123,7 +127,8 @@ export function createApp({store,runtime,config,local=null,projects:createProjec
   app.get('/api/config',(req,res)=>res.json({registrationEnabled:true,providerConfigured:req.user?runtime.providerConfigured(req.user.id):false,model:config.model}));
   app.use('/api',(req,res,next)=>{
     if(!['POST','PUT','PATCH','DELETE'].includes(req.method))return next();
-    if(!req.is('application/json'))throw new AppError('请求必须使用 JSON 格式',415);
+    const chatUpload=req.method==='POST'&&/^\/threads\/[a-f0-9-]{36}\/turns$/.test(req.path)&&req.is('multipart/form-data');
+    if(!chatUpload&&!req.is('application/json'))throw new AppError('请求必须使用 JSON 格式',415);
     req.body??={};
     const expected=config.publicOrigin||`${req.protocol}://${req.get('host')}`;
     if((req.get('origin')&&req.get('origin')!==expected)||req.get('sec-fetch-site')==='cross-site')throw new AppError('请求来源不被允许',403);
@@ -228,18 +233,51 @@ export function createApp({store,runtime,config,local=null,projects:createProjec
     res.status(201).json({thread:store.createThread(null,req.user.id,requiredText(req.body.title??'新对话','对话标题',100))});
   });
   app.get('/api/threads/:id',auth,(req,res)=>{const thread=ownedThread(req);res.json({thread,messages:store.getMessages(thread.id),run:store.getLatestRun(thread.id)});});
-  app.post('/api/threads/:id/turns',auth,async(req,res)=>{
-    const thread=ownedThread(req),project=thread.projectId===null?null:store.getProject(thread.projectId),text=requiredText(req.body.text,'消息',24000);
-    if(thread.projectId!==null&&(!project||project.userId!==req.user.id))throw new AppError('项目不存在',404);
+  app.get('/api/chat-artifacts/:id',auth,(req,res)=>{
+    const artifact=/^[a-f0-9-]{36}$/.test(req.params.id)&&store.getChatArtifact(req.params.id,req.user.id);
+    if(!artifact)throw new AppError('图片不存在',404);
+    res.set({'Content-Type':artifact.mimeType,'Content-Disposition':'inline; filename="'+artifact.name+'"','Cross-Origin-Resource-Policy':'same-origin'});
+    res.send(Buffer.from(artifact.data));
+  });
+  app.post('/api/threads/:id/turns',auth,(req,res,next)=>{
     rate(req,'turn',30,60_000);
+    req.turnThread=ownedThread(req);
+    if(!req.is('multipart/form-data'))return next();
+    if(req.turnThread.projectId!==null)throw new AppError('附件分析仅用于普通对话',415);
+    if(uploadsInProgress>=4)throw new AppError('服务器正在处理其他附件，请稍后重试',429);
+    uploadsInProgress++;
+    res.once('close',()=>uploadsInProgress--);
+    parseChatUpload(req,res,error=>{
+      if(error?.status===413)return next(new AppError('附件合计不能超过 8 MiB',413));
+      next(error);
+    });
+  },async(req,res)=>{
+    const thread=req.turnThread,project=thread.projectId===null?null:store.getProject(thread.projectId);
+    const multipart=req.is('multipart/form-data');
+    const body=multipart?await readChatMultipart(req.body,req.get('content-type')):req.body;
+    const files=multipart?body.files:[];
+    const tool=body.tool??(files.length?'analyze':undefined);
+    if(tool!==undefined&&(!chatTools.has(tool)||project))throw new AppError('无效的聊天工具',400);
+    if(tool==='analyze'&&!files.length)throw new AppError('请先添加要分析的附件',400);
+    const prompt=files.length&&(body.text===undefined||(typeof body.text==='string'&&!body.text.trim()))
+      ?'请分析这些附件，概括要点并指出值得关注的问题。':body.text;
+    const text=requiredText(prompt,'消息',24000);
+    if(thread.projectId!==null&&(!project||project.userId!==req.user.id))throw new AppError('项目不存在',404);
     const start=async()=>{
       if(project)idle(project.id);
       if(!runtime.providerConfigured(req.user.id))throw new AppError('请先在个人设置中填写你的 OpenAI API 密钥',409,'api_key_required');
       const user=store.getUser(req.user.id);if(!user||user.disabled)throw new AppError('账号已停用',403);
       if(store.getActiveRunsForUser(user.id).length>=1)throw new AppError('你已有一个任务在运行，请等待完成',409);
-      const run=store.createRun(thread.id,user.id),message=store.appendMessage(thread.id,'user',text);
-      try{await runtime.start({run,thread,project,user,text});}
-      catch(error){store.deleteMessage(message.id);store.updateRun(run.id,{status:'failed',error:error.message});throw error;}
+      const run=store.createRun(thread.id,user.id);
+      let message;
+      try{
+        message=store.appendMessage(thread.id,'user',text,{attachments:files.map(({name,mimeType,size})=>({name,mimeType,size}))});
+        await runtime.start({run,thread,project,user,text,tool,files});
+      }catch(error){
+        if(message)store.deleteMessage(message.id);
+        store.updateRun(run.id,{status:'failed',error:error.message});
+        throw error;
+      }
       if(thread.title==='新对话')store.updateThread(thread.id,{title:text.slice(0,50)});
       res.status(202).json({run:store.getRun(run.id)});
     };

@@ -86,6 +86,15 @@ export function createStore(dbPath,{credentialsKey}={}) {
       role TEXT NOT NULL CHECK(role IN ('user','assistant','system')), content TEXT NOT NULL, created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_id);
+    CREATE TABLE IF NOT EXISTS chat_message_metadata (
+      message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+      metadata TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS chat_artifacts (
+      id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, mime_type TEXT NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS chat_artifacts_message ON chat_artifacts(message_id);
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY, thread_id TEXT REFERENCES threads(id) ON DELETE SET NULL,
       project_id TEXT REFERENCES projects(id) ON DELETE SET NULL, user_id TEXT NOT NULL REFERENCES users(id),
@@ -137,6 +146,9 @@ export function createStore(dbPath,{credentialsKey}={}) {
     try { const result = fn(); db.exec('COMMIT'); return result; }
     catch (error) { db.exec('ROLLBACK'); throw error; }
   };
+  const artifactView = row => ({
+    id: row.id, name: row.name, mimeType: row.mime_type, size: row.size, url: '/api/chat-artifacts/' + row.id,
+  });
   // Historical quota/ledger tables remain untouched for migration and audit. New
   // requests record provider usage without balances, reservations or deductions.
   const usageUnion=`SELECT id,user_id,run_id,NULL credential_id,NULL key_last4,model,input_tokens,output_tokens,total_tokens,status,'legacy' source,created_at FROM usage
@@ -321,14 +333,49 @@ export function createStore(dbPath,{credentialsKey}={}) {
       const t=api.getThread(threadId);if(!t)throw new AppError('对话不存在',404);
       db.prepare('UPDATE threads SET title=?,codex_thread_id=?,updated_at=? WHERE id=?').run(patch.title??t.title,patch.codexThreadId??t.codexThreadId,now(),threadId);return api.getThread(threadId);
     },
-    appendMessage(threadId,role,content) {
-      const messageId=id(),at=now();
-      db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(messageId,threadId,role,String(content).slice(0,4_000_000),at);
-      db.prepare('UPDATE threads SET updated_at=? WHERE id=?').run(at,threadId);
-      db.prepare('UPDATE projects SET updated_at=? WHERE id=(SELECT project_id FROM threads WHERE id=?)').run(at,threadId);
-      return {id:messageId,threadId,role,content,createdAt:at};
+    appendMessage(threadId,role,content,{attachments=[],citations=[],artifacts=[]}={}) {
+      const messageId=id(),at=now(),metadata={};
+      if(attachments.length)metadata.attachments=attachments;
+      if(citations.length)metadata.citations=citations;
+      return tx(()=>{
+        if(artifacts.length){
+          const bytes=artifacts.reduce((sum,artifact)=>sum+artifact.data.length,0);
+          const total=db.prepare('SELECT coalesce(sum(size),0) n FROM chat_artifacts').get().n;
+          const owner=db.prepare('SELECT user_id FROM threads WHERE id=?').get(threadId).user_id;
+          const personal=db.prepare(`SELECT coalesce(sum(a.size),0) n FROM chat_artifacts a
+            JOIN messages m ON m.id=a.message_id JOIN threads t ON t.id=m.thread_id WHERE t.user_id=?`).get(owner).n;
+          if(total+bytes>2*1024**3||personal+bytes>256*1024**2)throw new AppError('图片存储空间已满，本次图片无法保存',507,'chat_artifact_storage_full');
+        }
+        db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(messageId,threadId,role,String(content).slice(0,4_000_000),at);
+        if(Object.keys(metadata).length)db.prepare('INSERT INTO chat_message_metadata VALUES(?,?)').run(messageId,JSON.stringify(metadata));
+        const saved=artifacts.map(artifact=>{
+          const row={id:id(),name:artifact.name,mime_type:artifact.mimeType,size:artifact.data.length};
+          db.prepare('INSERT INTO chat_artifacts VALUES(?,?,?,?,?,?)').run(row.id,messageId,row.name,row.mime_type,row.size,artifact.data);
+          return artifactView(row);
+        });
+        db.prepare('UPDATE threads SET updated_at=? WHERE id=?').run(at,threadId);
+        db.prepare('UPDATE projects SET updated_at=? WHERE id=(SELECT project_id FROM threads WHERE id=?)').run(at,threadId);
+        return {id:messageId,threadId,role,content,createdAt:at,...metadata,...(saved.length?{artifacts:saved}:{})};
+      });
     },
-    getMessages: threadId=>db.prepare('SELECT * FROM messages WHERE thread_id=? ORDER BY rowid ASC LIMIT 2000').all(threadId).map(r=>({id:r.id,role:r.role,content:r.content,createdAt:r.created_at})),
+    getMessages(threadId) {
+      const artifacts=new Map();
+      for(const row of db.prepare(`SELECT a.id,a.name,a.mime_type,a.size,a.message_id FROM messages m
+        JOIN chat_artifacts a ON a.message_id=m.id WHERE m.thread_id=? ORDER BY a.rowid`).all(threadId)){
+        if(!artifacts.has(row.message_id))artifacts.set(row.message_id,[]);
+        artifacts.get(row.message_id).push(artifactView(row));
+      }
+      return db.prepare(`SELECT m.*, x.metadata FROM messages m LEFT JOIN chat_message_metadata x ON x.message_id=m.id
+        WHERE m.thread_id=? ORDER BY m.rowid ASC LIMIT 2000`).all(threadId).map(r=>({
+        id:r.id,role:r.role,content:r.content,createdAt:r.created_at,
+        ...(r.metadata?JSON.parse(r.metadata):{}),...(artifacts.has(r.id)?{artifacts:artifacts.get(r.id)}:{}),
+      }));
+    },
+    getChatArtifact(artifactId,userId) {
+      return db.prepare(`SELECT a.name,a.mime_type mimeType,a.data FROM chat_artifacts a
+        JOIN messages m ON m.id=a.message_id JOIN threads t ON t.id=m.thread_id
+        WHERE a.id=? AND t.user_id=? AND t.project_id IS NULL`).get(artifactId,userId);
+    },
     getMessagesForContext(threadId,{maxMessages=200,maxBytes=4*1024*1024}={}) {
       integer(maxMessages,'历史消息数量',1);integer(maxBytes,'历史消息大小',1);
       const messages=[];let bytes=0;
