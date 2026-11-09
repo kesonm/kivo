@@ -46,6 +46,22 @@ test('device pairing, token hashing, owner isolation, job scoping and revocation
   assert.throws(() => bridge.authenticate({ get: name => name === 'authorization' ? 'Bearer ' + a.claim.token : undefined }), /失效/);
 });
 
+test('creating a child project under a connected parent does not reopen the parent', async t => {
+  const { bridge, alice, pair } = fixture(t), a = pair();
+  const polling = bridge.poll(a.auth), opening = bridge.addProject(alice.id, a.device.id, 'parent', 'parent');
+  const { job } = await polling;
+  bridge.result(a.auth, { id: job.id, result: { path: 'parent', name: 'parent' } });
+  const parent = await opening;
+  const childPoll = bridge.poll(a.auth), creating = bridge.addProject(alice.id, a.device.id, 'parent', 'child', true);
+  const { job: childJob } = await childPoll;
+  assert.deepEqual(childJob.params, { path: 'parent', name: 'child', create: true });
+  bridge.result(a.auth, { id: childJob.id, result: { path: 'parent/child', name: 'child' } });
+  const child = await creating;
+  assert.notEqual(child.id, parent.id);
+  assert.equal(child.localPath, 'parent/child');
+  assert.equal((await bridge.addProject(alice.id, a.device.id, 'parent', 'child', true)).id, child.id);
+});
+
 test('local files: create/open, write/read, independent checkpoints, deletion and directory containment', async t => {
   const dir = await mkdtemp(path.join(tmpdir(), 'kivo-local-files-'));
   t.after(() => rm(dir, { recursive: true, force: true }));

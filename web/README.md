@@ -86,11 +86,11 @@ cd /opt/codex-web/current
 sudo install -m 755 /usr/bin/docker deploy/docker-cli
 sudo docker build --network host --pull=false \
   --build-arg DEBIAN_MIRROR=http://mirrors.tencentyun.com \
-  -f deploy/Dockerfile --target build -t codex-workspace-build:1.4.0 .
-sudo docker run --rm --network none codex-workspace-build:1.4.0 npm test
+  -f deploy/Dockerfile --target build -t codex-workspace-build:1.4.1 .
+sudo docker run --rm --network none codex-workspace-build:1.4.1 npm test
 sudo docker build --network host --pull=false \
   --build-arg DEBIAN_MIRROR=http://mirrors.tencentyun.com \
-  -f deploy/Dockerfile -t codex-workspace-web:1.4.0 .
+  -f deploy/Dockerfile -t codex-workspace-web:1.4.1 .
 sudo docker compose -f deploy/compose.proxy.yaml up -d openai-proxy
 sudo docker compose -f deploy/compose.yaml up -d --force-recreate web
 ```

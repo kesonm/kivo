@@ -118,10 +118,13 @@ export function createLocalBridge({ store }) {
     },
     async addProject(userId, deviceId, relative, name, create = false) {
       owned(userId, deviceId); relative = localPath(relative);
-      const existing = db.prepare('SELECT project_id FROM local_projects WHERE device_id=? AND path=?').get(deviceId, relative);
+      name = text(name, 80);
+      if (create && name.includes('/')) throw new AppError('项目名称不能包含路径分隔符。');
+      const target = create ? localPath([relative, name].filter(Boolean).join('/')) : relative;
+      const existing = db.prepare('SELECT project_id FROM local_projects WHERE device_id=? AND path=?').get(deviceId, target);
       if (existing) return store.getProject(existing.project_id);
       if (db.prepare('SELECT count(*) n FROM projects WHERE user_id=?').get(userId).n >= 20) throw new AppError('每个账号最多创建 20 个项目', 409);
-      const result = await this.call(userId, deviceId, 'project.open', { path: relative, name: text(name, 80), create: !!create });
+      const result = await this.call(userId, deviceId, 'project.open', { path: relative, name, create: !!create });
       const normalized = localPath(result.path);
       const again = db.prepare('SELECT project_id FROM local_projects WHERE device_id=? AND path=?').get(deviceId, normalized);
       if (again) return store.getProject(again.project_id);
