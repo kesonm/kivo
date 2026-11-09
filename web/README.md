@@ -1,5 +1,7 @@
 # kivo
 
+Cloudflare 免费 Worker + 现有 Ubuntu 完整功能部署见 [Cloudflare 部署说明](cloudflare/README.md)。新域名配置为 `https://kivo.iptnet.xyz`，数据库、个人 Key 和 Codex 项目执行器保留在原服务器。
+
 基于 OpenAI Responses API 与官方 Codex app-server 的多用户浏览器工作台。部署地址：<https://124.220.52.44>。官方仓库源码保留在上级目录，网页服务位于 `web/`，执行器固定使用 `@openai/codex@0.167.0`。
 
 ## 普通聊天与项目（1.3.0）

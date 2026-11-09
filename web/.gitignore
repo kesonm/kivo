@@ -27,3 +27,8 @@ deploy/activate.py
 deploy/prepare-server.py
 deploy/proxy-prepare.py
 deploy/proxy-enable.py
+
+.wrangler/
+.dev.vars*
+cloudflare-origin-token
+cloudflare-backup-path
