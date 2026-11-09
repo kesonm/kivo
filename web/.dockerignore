@@ -31,3 +31,5 @@ deploy/proxy-enable.py
 .dev.vars*
 cloudflare-origin-token
 cloudflare-backup-path
+cloudflared-token
+cloudflare-tunnel-backup-path

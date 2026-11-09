@@ -14,12 +14,43 @@
 
 `wrangler.jsonc` 绑定自定义域名。静态资源优先直出，只有 API 路由调用 Worker；API 响应不缓存。`public/_headers` 与 Worker 均设置 CSP、禁止嵌入及其他安全响应头。关闭 Worker Observability，不记录用户会话、Cookie 或请求密钥。
 
-## 服务器切换
+## Tunnel 回源（当前部署方式）
+
+若公网源站域名在云厂商网络侧被阻断，Worker 的 HTTPS 回源会返回 525，即使服务器本机 TLS 检查正常。当前入口改用命名 Cloudflare Tunnel：Worker 仍请求 `https://origin-kivo.iptnet.xyz`，该域名通过 Tunnel 到 Ubuntu 的 `http://127.0.0.1:18400`，再经 Nginx 转发原后端。云端至 `cloudflared` 保持加密连接，HTTP 仅在服务器 loopback 使用；既有 `ORIGIN_TOKEN`、客户端 IP 检查与业务权限继续生效。
+
+使用现有 Cloudflare 账号的 **Networking → Tunnels** 创建 remotely-managed Tunnel（建议名 `kivo-origin`）。只发布 `origin-kivo.iptnet.xyz` 到 `http://127.0.0.1:18400`；不添加私有网络、其他端口或 Cloudflare Access 登录。发布路由时将旧 DNS-only A 记录替换为该 Tunnel 的 proxied CNAME，目标由 Cloudflare 提供。先记下原记录，只有 connector Ready 后再切换域名。
+
+`cloudflared` 使用官方发布的二进制，部署前核对版本与 SHA256，安装为 `/usr/local/bin/cloudflared`。此服务仅需单个 Tunnel 的运行令牌，不需要保存账号 API Token 或 `cert.pem`。把 Tunnel token 安全写入 `/etc/codex-web/cloudflared-token`，所有者 root、权限 `0600`；不要把值放进 shell 历史、进程参数、环境变量或仓库。`--token-file` 要求 cloudflared 2025.4.0 或更新版本。
+
+仅在服务器执行：
+
+```sh
+sudo python3 -m py_compile deploy/cloudflare-tunnel.py
+sudo python3 deploy/cloudflare-tunnel.py prepare
+# 安全提供 root:root 0600 的 /etc/codex-web/cloudflared-token 后：
+sudo python3 deploy/cloudflare-tunnel.py start
+# Cloudflare 配好上述主机名路由与 DNS 后：
+sudo python3 deploy/cloudflare-tunnel.py verify
+```
+
+`prepare` 仅建立 `127.0.0.1:18400` Nginx 入口与 `kivo-cloudflared.service`，复用既有授权 map，验证后 reload Nginx，不重启业务容器。服务使用 systemd `DynamicUser` 与 `LoadCredential`，令牌通过运行时凭据文件交给 `--token-file`。metrics/ready 仅监听 `127.0.0.1:18401`。保持 info 日志，不使用会输出请求头的 debug 日志。
+
+业务 API 和健康检查仍要求回源令牌。仅 `/.well-known/acme-challenge/` 从既有 `/var/www/codex-acme` 公开读取挑战文件，让历史公网源站证书可以继续自动续期；其余路径返回 404。
+
+默认 `--protocol auto` 先尝试 QUIC，UDP 不通会回退到 HTTP/2；两者均连接 Cloudflare **7844** 端口，分别使用 UDP 和 TCP。必要时停止服务后执行 `prepare --protocol http2` 再 `start`。HTTP/2 不改用 443；普通 `HTTPS_PROXY` 不能视为已验证的 Tunnel 出网方案。先按官方防火墙文档确认两个区域的 endpoints 均可达。
+
+若启动后 90 秒仍未 Ready，helper 会停止 connector，保留配置与凭据供检查。`verify` 检查未授权请求为 403、缺少客户端 IP 为 400、授权本机健康为 200，以及公网 Worker 健康。之后仍需通过公网 `/api/session` 验证 Cookie/CSRF，并验证登录、项目与 SSE。
+
+本机配置回滚命令是 `sudo python3 deploy/cloudflare-tunnel.py rollback`，快照路径保存在 `/etc/codex-web/cloudflare-tunnel-backup-path`。它停止此 connector、恢复本次新增前的 Nginx/unit 文件，不删除凭据、不修改数据库；Cloudflare 主机名路由/DNS 需要单独恢复。原公网域名已遭阻断时，恢复旧 A 记录并不能修复该网络问题，须先准备可用回源路径。
+
+官方参考：[创建 Tunnel](https://developers.cloudflare.com/tunnel/get-started/)、[运行参数与 token-file](https://developers.cloudflare.com/tunnel/reference/run-parameters/)、[7844 出站要求](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/)。
+
+## 初次服务器切换与历史公网 TLS 回源
 
 以下操作只在部署服务器上执行，先检查脚本里的域名是否适合目标环境。
 
 1. `sudo python3 deploy/cloudflare-origin.py prepare`：一致备份 SQLite、配置和源码，生成独立回源令牌及 HTTP ACME 入口。
-2. 添加 DNS-only A 记录 `origin-kivo` 指向现有服务器；不修改邮件或其他服务记录。
+2. 初次公网 TLS 方式添加 DNS-only A 记录 `origin-kivo` 指向现有服务器；当前使用上面的 Tunnel 路由时不要恢复此 A 记录，也不修改邮件或其他服务记录。
 3. `sudo python3 deploy/cloudflare-origin.py tls`：使用既有 Certbot 账户签发有效回源证书，启用凭据校验；现有证书续期 timer 同时维护它。
 4. 部署 Worker，并在 Cloudflare Secrets 保存 `ORIGIN_TOKEN`。令牌不允许明文显示给普通用户。
 5. Worker 域名和 HTTPS 就绪后，执行 `sudo python3 deploy/cloudflare-origin.py activate`：确认无活动任务，切换 `PUBLIC_ORIGIN`，保留数据库和既有运行镜像，健康检查通过后将旧 IP 入口跳转到新域名。
