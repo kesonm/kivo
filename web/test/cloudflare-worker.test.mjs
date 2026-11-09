@@ -54,7 +54,8 @@ test('API forwarding keeps cookies, CSRF, body, query and original Origin while 
     for (const name of ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'x-kivo-other', 'authorization']) assert.equal(options.headers.get(name), null, name);
     assert.equal(options.body, input.body);assert.equal(await new Response(options.body).text(), '{"text":"private prompt"}');
     assert.equal(options.signal, input.signal);assert.equal(options.redirect, 'manual');assert.equal(options.cache, 'no-store');
-    assert.deepEqual(options.cf, { cacheEverything: false, cacheTtl: 0 });
+    // workerd rejects cache: 'no-store' combined with cf.cacheTtl: 0.
+    assert.equal(options.cf, undefined);
     return Response.json({ ok: true }, { status: 202 });
   });
   assert.equal(calls, 1);assert.equal(result.status, 202);

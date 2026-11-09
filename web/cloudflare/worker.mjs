@@ -97,7 +97,7 @@ export async function handleRequest(request, env, fetchImpl = fetch) {
       method: request.method, headers,
       ...(request.body === null ? {} : { body: request.body, duplex: 'half' }),
       signal: request.signal,
-      redirect: 'manual', cache: 'no-store', cf: { cacheEverything: false, cacheTtl: 0 },
+      redirect: 'manual', cache: 'no-store',
     });
     // Never forward the origin credential across a redirect or leak a private
     // backend URL in Location. Backend APIs are not redirect endpoints.
