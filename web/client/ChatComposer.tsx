@@ -39,9 +39,12 @@ type ComposerProps = {
   onSend: (event?: FormEvent) => void;
   onStop: () => void;
   onOpenLocal: () => void;
+  workRestricted?: boolean;
+  voiceRestricted?: boolean;
+  onBusyChange?: (busy: boolean) => void;
 };
 
-export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach, onRemove, tool, onTool, model, models, onModel, effort, onEffort, ultra, ultraAvailable, onUltra, onOpenReasoning, threadId, providerConfigured, busy, running, sending, stopping, onSend, onStop, onOpenLocal }: ComposerProps) {
+export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach, onRemove, tool, onTool, model, models, onModel, effort, onEffort, ultra, ultraAvailable, onUltra, onOpenReasoning, threadId, providerConfigured, busy, running, sending, stopping, onSend, onStop, onOpenLocal, workRestricted = false, voiceRestricted = false, onBusyChange }: ComposerProps) {
   const [menu, setMenu] = useState<'tools' | 'reasoning' | 'models' | null>(null);
   const [opensBelow, setOpensBelow] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
@@ -65,6 +68,7 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
     setVoiceBusy(value);
     if (value) setMenu(null);
   }, []);
+  useEffect(() => { onBusyChange?.(voiceBusy); }, [voiceBusy, onBusyChange]);
 
   useEffect(() => {
     if (!menu || blocked) return;
@@ -182,7 +186,7 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
           aria-expanded={modelMenuOpen} aria-controls={modelMenuOpen ? menuId : undefined} disabled={blocked || !models.length} onClick={() => toggleMenu('reasoning')}>
           <span>{ultra ? 'Ultra' : modelLabel}</span><Icon name="down" size={13} />
         </button>
-        <VoiceControls disabled={busy || !providerConfigured || nativeVoiceBlocked} disabledReason={nativeVoiceBlocked ? '请在浏览器中使用语音功能' : undefined}
+        <VoiceControls disabled={busy || !providerConfigured || nativeVoiceBlocked || workRestricted || voiceRestricted} disabledReason={workRestricted || voiceRestricted ? '请先发送一条普通问答结束工作上下文，再使用语音功能' : nativeVoiceBlocked ? '请在浏览器中使用语音功能' : undefined}
           hasDraft={hasDraft || running} threadId={threadId} onDictation={insertDictation} onBusyChange={updateVoiceBusy} />
         {running ? <button type="button" className="send-button stop-button" title="停止任务" aria-label="停止任务" disabled={stopping} onClick={onStop}>
           {stopping ? <span className="spinner" /> : <Icon name="stop" size={17} />}
@@ -199,8 +203,8 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
       }}
       className={`composer-popover composer-popover-${menu} ${opensBelow ? 'popover-below' : 'popover-above'}`}>
       {menu === 'tools' ? <>
-        <button type="button" role="menuitem" disabled={attachments.length >= maxFiles} onClick={() => { setMenu(null); fileInput.current?.click(); }}>
-          <Icon name="file" size={17} /><span className="composer-option-title">添加照片和文件</span><span className="composer-option-description">上传、粘贴与分析附件</span>
+        <button type="button" role="menuitem" disabled={attachments.length >= maxFiles || workRestricted} onClick={() => { setMenu(null); fileInput.current?.click(); }}>
+          <Icon name="file" size={17} /><span className="composer-option-title">添加照片和文件</span><span className="composer-option-description">{workRestricted ? '切换到普通问答后使用' : '上传、粘贴与分析附件'}</span>
         </button>
         {toolOptions.map(option => <button type="button" role="menuitem" key={option.id} disabled={attachments.length > 0} onClick={() => { onTool(option.id); setMenu(null); textarea.current?.focus(); }}>
           <Icon name={option.icon} size={17} /><span className="composer-option-title">{option.label}</span><span className="composer-option-description">{option.description}</span>

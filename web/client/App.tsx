@@ -5,7 +5,7 @@ import { Account } from './Account';
 import { Admin } from './Admin';
 import { Workspace } from './Workspace';
 import { LocalDevices, LocalProjectDialog } from './Local';
-import { Brand, Icon, Logo } from './icons';
+import { Brand, Icon } from './icons';
 import { getDirtyFile } from './navigation';
 import { ErrorBox, Loading, useDialog, useNotice } from './ui';
 import type { Project, Session, Thread, User } from './types';
@@ -29,9 +29,10 @@ export function App() {
   const [threadsRevision, setThreadsRevision] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const sidebarRef = useRef<HTMLElement>(null);
-  const sidebarOpenButton = useRef<HTMLButtonElement>(null);
+  const sidebarOpenButton = useRef<HTMLButtonElement | null>(null);
   const sidebarCloseButton = useRef<HTMLButtonElement>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [navigationTab,setNavigationTab] = useState<'history'|'projects'|'account'>('history');
+  const [historySearch,setHistorySearch] = useState('');
   const [workspaceVersion, setWorkspaceVersion] = useState(0);
   const [projectSearch, setProjectSearch] = useState('');
   const [creating, setCreating] = useState(false);
@@ -47,11 +48,11 @@ export function App() {
 
   useEffect(() => {
     if (!sidebarOpen || !user) return;
-    const mobile = window.matchMedia('(max-width: 800px)');
-    const hasModal = () => !!document.querySelector('[role="dialog"][aria-modal="true"]');
+
+    const hasModal = () => !!document.querySelector('[role="dialog"][aria-modal="true"]:not(#primary-navigation)');
     const visible = (element: HTMLElement) => element.getClientRects().length > 0 && window.getComputedStyle(element).visibility !== 'hidden';
     const focusClose = () => {
-      if (mobile.matches && !hasModal()) sidebarCloseButton.current?.focus({ preventScroll: true });
+      if (!hasModal()) sidebarCloseButton.current?.focus({ preventScroll: true });
     };
     const sidebar = sidebarRef.current;
     const opened = (event: TransitionEvent) => {
@@ -60,7 +61,7 @@ export function App() {
     sidebar?.addEventListener('transitionend', opened);
     const openingFrame = window.requestAnimationFrame(focusClose);
     const keydown = (event: KeyboardEvent) => {
-      if (!mobile.matches || hasModal() || event.defaultPrevented) return;
+      if (hasModal() || event.defaultPrevented) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         setSidebarOpen(false);
@@ -81,14 +82,14 @@ export function App() {
         event.preventDefault(); first.focus();
       }
     };
-    const resized = () => { if (!mobile.matches) setSidebarOpen(false); };
+
     document.addEventListener('keydown', keydown);
-    mobile.addEventListener('change', resized);
+
     return () => {
       window.cancelAnimationFrame(openingFrame);
       sidebar?.removeEventListener('transitionend', opened);
       document.removeEventListener('keydown', keydown);
-      mobile.removeEventListener('change', resized);
+
       const opener = sidebarOpenButton.current;
       if (!hasModal() && opener?.isConnected && visible(opener)) opener.focus();
     };
@@ -125,9 +126,9 @@ export function App() {
   useEffect(() => {
     if (!user?.id) { setChats([]); setChatsLoading(false); return; }
     let cancelled = false; setChatsLoading(true); setChatsError('');
-    api<{ threads: Thread[] }>('/api/threads').then(result => { if (!cancelled) setChats(result.threads); }).catch(e => { if (!cancelled) setChatsError(messageOf(e)); }).finally(() => { if (!cancelled) setChatsLoading(false); });
+    api<{ threads: Thread[] }>(`/api/history?q=${enc(historySearch)}`).then(result => { if (!cancelled) setChats(result.threads); }).catch(e => { if (!cancelled) setChatsError(messageOf(e)); }).finally(() => { if (!cancelled) setChatsLoading(false); });
     return () => { cancelled = true; };
-  }, [user?.id, threadsRevision]);
+  }, [user?.id, threadsRevision, historySearch]);
   useEffect(() => {
     if (!projectId || !user) { setThreads([]); setThreadsLoading(false); return; }
     let cancelled = false; setThreadsLoading(true);
@@ -207,33 +208,25 @@ export function App() {
   if (initializing) return <div className="boot-screen"><Brand /><Loading label="正在打开工作空间…" /></div>;
   if (error && !session) return <div className="boot-screen"><Brand /><ErrorBox error={error} onRetry={() => void initialize()} /></div>;
   if (!user) return <Auth onLogin={nextUser => void onLogin(nextUser)} />;
-  return <div className={'app-shell' + (sidebarCollapsed ? ' sidebar-collapsed' : '')}>
+  return <div className="app-shell unified-shell">
     {sidebarOpen && <button className="sidebar-backdrop" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} />}
-    {sidebarCollapsed && <aside className="desktop-rail" aria-label="收起的导航">
-      <span className="rail-logo logo-container"><Logo /></span>
-      <button className="icon-button" aria-label="展开侧栏" title="展开侧栏" onClick={() => setSidebarCollapsed(false)}><Icon name="sidebar" size={20} /></button>
-      <button className="icon-button" aria-label="新对话" title="新对话" onClick={() => void startNewConversation()}><Icon name="edit" size={20} /></button>
-      <div className="rail-spacer" />
-      {user.role === 'admin' && <button className="icon-button" title="管理后台" aria-label="管理后台" onClick={() => void navigate('admin')}><Icon name="shield" size={20} /></button>}
-      <button className="icon-button" title="账户设置" aria-label="账户设置" onClick={() => void navigate('account')}><Icon name="user" size={20} /></button>
-    </aside>}
-    <aside ref={sidebarRef} id="primary-navigation" aria-label="主导航" tabIndex={-1} className={'sidebar' + (sidebarOpen ? ' sidebar-open' : '')}>
+    {sidebarOpen && <aside ref={sidebarRef} role="dialog" aria-modal="true" id="primary-navigation" aria-label="主导航" tabIndex={-1} className={'sidebar' + (sidebarOpen ? ' sidebar-open' : '')}>
       <div className="sidebar-brand">
-        <Brand small />
-        <button className="icon-button sidebar-collapse" aria-label="收起侧栏" title="收起侧栏" onClick={() => setSidebarCollapsed(true)}><Icon name="sidebar" size={19} /></button>
+<strong>{navigationTab==='history'?'搜索历史':navigationTab==='projects'?'工作对象':'账户与管理'}</strong>
         <button ref={sidebarCloseButton} className="icon-button mobile-close" aria-label="关闭导航" onClick={() => setSidebarOpen(false)}><Icon name="close" /></button>
       </div>
-      <div className="sidebar-top">
+      {navigationTab==='projects' && <div className="sidebar-top">
         <nav className="sidebar-primary" aria-label="工作空间">
           <button className={'sidebar-action sidebar-new-chat' + (view === 'workspace' && !projectId && !threadId ? ' selected' : '')} onClick={() => void startNewConversation()}><Icon name="edit" size={19} /><span>新对话</span></button>
           <button className="sidebar-action" disabled={creating} onClick={() => void createProject()}><Icon name="folder" size={19} /><span>{creating ? '正在创建…' : '创建项目'}</span></button>
         </nav>
-      </div>
+      </div>}
       <div className="sidebar-scroll">
-        <div className="sidebar-section-label"><span>最近对话</span></div>
+        {navigationTab==='history' && <><div className="sidebar-search"><Icon name="search" size={17}/><input aria-label="搜索历史对话" placeholder="搜索对话标题" value={historySearch} onChange={e=>setHistorySearch(e.target.value)}/></div><div className="sidebar-section-label"><span>最近对话（最多 100 条）</span></div>
         {chatsLoading && chats.length === 0 ? <div className="sidebar-loading small">加载对话…</div> : chatsError ? <div className="sidebar-error"><p>{chatsError}</p><button onClick={onThreadsChanged}>重试</button></div> : chats.map(thread => <button key={thread.id} title={thread.title} className={'sidebar-thread' + (view === 'workspace' && !projectId && threadId === thread.id ? ' selected' : '')} onClick={() => void selectThread(thread)}><Icon name="chat" size={15} /><span>{thread.title || '未命名对话'}</span></button>)}
-        {!chatsLoading && !chatsError && chats.length === 0 && <p className="sidebar-empty small">直接开始聊天，对话会保存在这里。</p>}
-        <div className="sidebar-projects">
+        {!chatsLoading && !chatsError && chats.length === 0 && <p className="sidebar-empty small">{historySearch.trim() ? '没有匹配的历史对话。' : '直接开始聊天，对话会保存在这里。'}</p>}
+        </>}
+        {navigationTab==='projects' && <div className="sidebar-projects">
         <div className="sidebar-section-label"><span>项目空间</span><span>{projects.length}</span></div>
         <div className="sidebar-search"><Icon name="search" size={17} /><input value={projectSearch} onChange={event => setProjectSearch(event.target.value)} aria-label="搜索项目" placeholder="搜索项目" /></div>
         {projectsLoading ? <div className="sidebar-loading"><span className="spinner" />加载项目…</div> : projectsError ? <div className="sidebar-error"><p>{projectsError}</p><button onClick={() => void loadProjects()}>重试</button></div> : projects.filter(project => project.name.toLowerCase().includes(projectSearch.toLowerCase())).map(project => <button key={project.id} className={'sidebar-project' + (view === 'workspace' && projectId === project.id ? ' selected' : '')} onClick={() => void selectProject(project.id)}><Icon name={project.location === "local" ? "terminal" : "folder"} size={17} /><span>{project.name}{project.location === "local" && <small className="caption"> · 本地</small>}</span>{projectId === project.id && <span className="project-selected-dot" />}</button>)}
@@ -245,9 +238,9 @@ export function App() {
           {threadsLoading ? <div className="sidebar-loading small">加载对话…</div> : threads.map(thread => <button key={thread.id} title={thread.title} className={'sidebar-thread' + (view === 'workspace' && projectId === thread.projectId && threadId === thread.id ? ' selected' : '')} onClick={() => void selectThread(thread)}><Icon name="chat" size={15} /><span>{thread.title || '未命名对话'}</span></button>)}
           {!threadsLoading && threads.length === 0 && <p className="sidebar-empty small">对话开始后，会保存在这里。</p>}
         </div>}
-        </div>
+        </div>}
       </div>
-      <div className="sidebar-bottom">
+      {navigationTab==='account' && <div className="sidebar-bottom">
         <button className="sidebar-usage" onClick={() => void navigate('account')} title={'本站已知用量 ' + number(user.usedTokens) + ' tokens'}><div><Icon name="activity" size={16} /><span>本站用量</span><strong>{compact(user.usedTokens)}</strong></div><span><span>API Key · {user.apiKeyConfigured ? '已配置' : '未配置'}</span><Icon name="chevron" size={13} /></span></button>
         <nav className="sidebar-nav">
           <button className={view === 'account' ? 'selected' : ''} onClick={() => void navigate('account')}><Icon name="settings" size={18} />账户设置</button>
@@ -255,10 +248,10 @@ export function App() {
           {user.role === 'admin' && <button className={view === 'admin' ? 'selected' : ''} onClick={() => void navigate('admin')}><Icon name="shield" size={18} />管理后台</button>}
         </nav>
         <div className="sidebar-profile"><div className="sidebar-avatar">{(user.displayName || user.username).slice(0, 1).toUpperCase()}</div><div><strong>{user.displayName || user.username}</strong><span>{user.role === 'admin' ? '管理员' : '成员'}</span></div><button className="icon-button" title="退出登录" aria-label="退出登录" onClick={() => void logout()}><Icon name="logout" size={17} /></button></div>
-      </div>
-    </aside>
-    <div className="main-shell">
-      <header className="mobile-topbar"><button ref={sidebarOpenButton} className="icon-button" aria-label="打开导航" aria-expanded={sidebarOpen} aria-controls="primary-navigation" onClick={() => setSidebarOpen(true)}><Icon name="menu" /></button><Brand small /><button className="icon-button" aria-label="账户设置" onClick={() => void navigate('account')}><Icon name="user" /></button></header>
+      </div>}
+    </aside>}
+    <div className="main-shell" inert={sidebarOpen || undefined}>
+      <header className="unified-topbar"><Brand small /><button aria-label="新对话" onClick={()=>void startNewConversation()}><Icon name="plus" size={18}/><span>新对话</span></button><button aria-label="搜索历史" onClick={event=>{sidebarOpenButton.current=event.currentTarget;setNavigationTab('history');setSidebarOpen(true);}}><Icon name="search" size={18}/><span>搜索历史</span></button><button aria-label="工作对象" onClick={event=>{sidebarOpenButton.current=event.currentTarget;setNavigationTab('projects');setSidebarOpen(true);}}><Icon name="folder" size={18}/><span>工作对象</span></button><button aria-label="账户与管理" onClick={event=>{sidebarOpenButton.current=event.currentTarget;setNavigationTab('account');setSidebarOpen(true);}}><Icon name="user" size={18}/></button></header>
       {view === 'workspace' ? <Workspace key={(projectId || 'chat') + ':' + workspaceVersion} project={selectedProject} threadId={threadId} onThreadCreated={onThreadCreated} onThreadsChanged={onThreadsChanged} user={user} providerConfigured={!!session?.providerConfigured} model={session?.model} defaultChatModel={session?.defaultChatModel} chatModels={session?.chatModels} refreshSession={refreshSession} onRenameProject={() => void renameProject()} onDeleteProject={() => void deleteProject()} onOpenAccount={() => void navigate('account')} onOpenLocal={async () => { if (await confirmNavigation()) setLocalDialog('open'); }} /> : view === 'local' ? <LocalDevices /> : view === 'admin' && user.role === 'admin' ? <Admin currentUser={user} onModelsSaved={() => void refreshSession(user.id).catch(() => undefined)} /> : <Account user={user} refreshSession={refreshSession} />}
     </div>
     {localDialog && <LocalProjectDialog mode={localDialog} onClose={() => setLocalDialog(null)} onCloud={() => { setLocalDialog(null); void createCloudProject(); }} onSetup={() => { setLocalDialog(null); void navigate('local'); }} onProject={project => { if (activeLocation.current.userId !== user.id) return; setLocalDialog(null); setProjects(old => [project, ...old.filter(p => p.id !== project.id)]); openConversation(project.id, null); }} />}

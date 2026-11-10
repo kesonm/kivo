@@ -2,7 +2,7 @@ import { promises as fs, constants } from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { AppError } from './store.mjs';
 
 const exec = promisify(execFile);
@@ -132,8 +132,42 @@ export function createProjects(config) {
     return raw.split('\0').filter(Boolean).map(r=>({path:r.slice(3),status:r.slice(0,2).trim()}));
   }
 
+  async function executionEnvironment(id) {
+    const base = projectPath(id), stat = await fs.lstat(base), real = await fs.realpath(base);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || real !== base) throw new AppError('执行目录身份无法核实', 409, 'execution_environment_changed');
+    const fingerprint = createHash('sha256');
+    let bytes = 0, count = 0;
+    // Include both tracked and untracked bytes, never execute repository hooks,
+    // filters or follow links while computing a read-only workspace checkpoint.
+    async function visit(dir, prefix = '') {
+      for (const name of (await fs.readdir(dir)).sort()) {
+        if (!prefix && name === '.git') continue;
+        if (++count > 25000) throw new AppError('工作区过大，无法核实执行版本', 409, 'execution_environment_unverified');
+        const filename = path.join(dir, name), relative = prefix + name, info = await fs.lstat(filename);
+        fingerprint.update(JSON.stringify([relative, info.mode, info.isSymbolicLink() ? 'link' : info.isDirectory() ? 'directory' : 'file']));
+        if (info.isSymbolicLink()) { fingerprint.update(await fs.readlink(filename)); continue; }
+        if (info.isDirectory()) { await visit(filename, relative + '/'); continue; }
+        if (!info.isFile() || (bytes += info.size) > 200 * 1024 * 1024) throw new AppError('工作区包含无法核实的文件', 409, 'execution_environment_unverified');
+        const handle = await fs.open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const opened = await handle.stat();
+          if (opened.ino !== info.ino || opened.dev !== info.dev || opened.size !== info.size) throw new AppError('检查期间工作区已改变', 409, 'execution_environment_changed');
+          for await (const chunk of handle.createReadStream({ autoClose: false })) fingerprint.update(chunk);
+          const after = await handle.stat();
+          if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) throw new AppError('检查期间文件已改变', 409, 'execution_environment_changed');
+        } finally { await handle.close(); }
+      }
+    }
+    await visit(base);
+    const branch = (await git(id, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    const baseRevision = (await git(id, ['rev-parse', '--verify', 'HEAD'])).trim();
+    const dirtyPaths = (await changedFiles(id)).map(file => file.path).slice(0, 3000);
+    return { workspace: `${real}#${stat.dev}:${stat.ino}`, branch, baseRevision,
+      dirtyFingerprint: fingerprint.digest('hex'), dirtyPaths };
+  }
+
   return {
-    withLock,projectPath,
+    withLock,projectPath,executionEnvironment,
     async initialize(id,name) {
       await checkFreeSpace();
       const p=projectPath(id);await fs.mkdir(root,{recursive:true,mode:0o700});await fs.mkdir(p,{mode:0o700});await own(p);

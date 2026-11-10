@@ -60,3 +60,46 @@ export interface AdminThread extends Thread { owner: { id: string; username: str
 export interface ThreadPage { threads: AdminThread[]; total: number; limit: number; offset: number }
 export interface ThreadRecord { thread: Thread; owner: { id: string; username: string; displayName: string }; project: { id: string; name: string } | null; messages: Message[]; runs: Run[]; messagesTotal: number; runsTotal: number; messageOffset: number; runOffset: number; nextMessageOffset: number | null; nextRunOffset: number | null }
 export interface AuditEntry { id: string; actor: string; action: string; target: string; detail: string; createdAt: string }
+
+export type WorkRoutingMode = 'off' | 'shadow' | 'enforce';
+export type WorkIntent = 'question' | 'new' | 'continue' | 'fork' | 'revise' | 'reference' | 'compare';
+export interface WorkSelection {
+  intent: WorkIntent;
+  taskId?: string;
+  objectId?: string;
+  referenceIds?: string[];
+  focusRevision?: number;
+  taskVersion?: number;
+}
+export interface WorkObject {
+  id: string; name: string; kind: string; projectId: string | null; version: number;
+  aliases?: string[]; anchors?: Record<string, unknown>; updatedAt?: string;
+}
+export interface WorkTask {
+  id: string; goal: string; status: string; version: number; generation?: number;
+  objects: (WorkObject & { role: 'target' | 'reference' })[];
+  constraints?: string[]; acceptance?: string[]; updatedAt?: string;
+  parentTaskId?: string | null; relation?: string | null;
+}
+export interface WorkFocus {
+  revision: number; taskId: string | null; objectId: string | null;
+  source?: string; updatedAt?: string;
+}
+export interface WorkCandidate {
+  id: string; goal?: string; name?: string; status?: string; state?: string;
+  objectName?: string; projectId?: string | null; updatedAt?: string; version?: number;
+  kind?: string; taskId?: string; objectId?: string;
+}
+export interface WorkRoute {
+  status: 'matched' | 'new' | 'ambiguous' | 'unresolved' | 'blocked';
+  intent?: WorkIntent; taskId?: string | null; objectId?: string | null;
+  candidates?: WorkCandidate[]; reason?: string; evidence?: unknown[]; allowed?: boolean | string[];
+  objectCandidates?: { id: string; name: string; projectId?: string | null }[];
+}
+export interface WorkSnapshot {
+  mode: WorkRoutingMode; objects: WorkObject[]; tasks: WorkTask[];
+  executionScope?: 'question' | 'task' | 'legacy_project';
+  focus?: WorkFocus; task?: WorkTask | null; executionProject?: Project | null;
+  decisions?: { id?: string; status?: string; reason?: string; createdAt?: string; intent?: string }[];
+  artifacts?: { id: string; name?: string; title?: string; version: number; status?: string; verificationStatus?: string }[];
+}

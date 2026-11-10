@@ -1,6 +1,6 @@
 services:
   web:
-    image: codex-workspace-web:1.11.0
+    image: codex-workspace-web:1.12.0
     container_name: codex-workspace-web
     restart: unless-stopped
     init: true

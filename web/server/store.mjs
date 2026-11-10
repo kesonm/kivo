@@ -301,6 +301,13 @@ export function createStore(dbPath,{credentialsKey}={}) {
     return patch.verification !== undefined || patch.interruptReason !== undefined || patch.requestMessageId !== undefined;
   }
   function saveRun(run, patch) {
+    // Terminal runs are immutable. A delayed event cannot resurrect a cancelled
+    // execution or overwrite the output of a later attempt.
+    if (run.status !== 'running') {
+      if (patch.status !== undefined && patch.status !== run.status || patch.output !== undefined && patch.output !== run.output
+        || patch.logs !== undefined || hasRunDetails(patch)) throw new AppError('执行已经结束，旧结果不能覆盖当前状态',409,'run_terminal');
+      return;
+    }
     if (hasRunDetails(patch)) updateRunDetails(run,patch);
     db.prepare('UPDATE runs SET status=?,output=?,logs=?,error=?,updated_at=? WHERE id=?').run(
       patch.status??run.status,String(patch.output??run.output).slice(0,4_000_000),
@@ -552,12 +559,14 @@ export function createStore(dbPath,{credentialsKey}={}) {
       return messages;
     },
     deleteMessage: messageId=>db.prepare('DELETE FROM messages WHERE id=?').run(messageId),
-    createRun(threadId,userId,{mode,verificationCommand:rawCommand,resumedFromRunId}={}) {
+    createRun(threadId,userId,{mode,verificationCommand:rawCommand,resumedFromRunId,executionProjectId}={}) {
       if (mode !== undefined && !RUN_MODES.has(mode)) throw new AppError('任务运行环境无效');
       const command = rawCommand === undefined ? null : verificationCommand(rawCommand);
       return tx(()=>{
         const thread = api.getThread(threadId);
         if (!thread || thread.userId !== userId) throw new AppError('对话不存在',404);
+        const projectId = executionProjectId === undefined ? thread.projectId : executionProjectId;
+        if (projectId !== null && api.getProject(projectId)?.userId !== userId) throw new AppError('执行项目不存在',404);
         if (resumedFromRunId !== undefined) {
           const previous = typeof resumedFromRunId === 'string' ? api.getRun(resumedFromRunId) : null;
           if (!previous || previous.userId !== userId || previous.threadId !== threadId) throw new AppError('原任务不存在',404);
@@ -565,7 +574,7 @@ export function createStore(dbPath,{credentialsKey}={}) {
           if (api.getResumedRun(resumedFromRunId)) throw new AppError('此任务已继续执行',409,'run_already_resumed');
         }
         const runId=id(),at=now();
-        try { db.prepare('INSERT INTO runs(id,thread_id,project_id,user_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)').run(runId,threadId,thread.projectId,userId,'running',at,at); }
+        try { db.prepare('INSERT INTO runs(id,thread_id,project_id,user_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)').run(runId,threadId,projectId,userId,'running',at,at); }
         catch (error) { if (error.message.includes('UNIQUE')) throw new AppError('此对话或项目已有任务正在执行',409); throw error; }
         if (mode || command || resumedFromRunId) {
           db.prepare('INSERT INTO run_details(run_id,mode,resumed_from_run_id,verification_command,verification_status) VALUES(?,?,?,?,?)')
@@ -591,7 +600,9 @@ export function createStore(dbPath,{credentialsKey}={}) {
     },
     appendRunEvent(runId,event,dedupeKey,{verification,runPatch}={}) {
       return tx(()=>{
-        if (!db.prepare('SELECT 1 FROM runs WHERE id=?').get(runId)) throw new AppError('任务不存在',404);
+        const run = api.getRun(runId);
+        if (!run) throw new AppError('任务不存在',404);
+        if (run.status !== 'running') return null;
         const recorded = insertRunEvent(runId,event,dedupeKey);
         if (recorded && runPatch) saveRun(api.getRun(runId),runPatch);
         else if (recorded && verification !== undefined) {

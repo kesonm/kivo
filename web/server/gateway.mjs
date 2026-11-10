@@ -330,6 +330,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       }
       const user = store.getUser(cap.userId);
       if (!user || user.disabled) throw new GatewayError('账号已停用。', 403);
+      if (store.work?.getRunBinding(cap.userId, cap.runId)) store.work.assertRunCurrent(cap.userId, cap.runId);
       if (req.method !== 'POST' || req.url !== '/v1/responses') throw new GatewayError('不支持的模型接口。', 404);
       if (req.headers.origin) throw new GatewayError('模型网关不接受浏览器请求。', 403);
       if (cap.inFlight) throw new GatewayError('同一任务已有模型请求在运行。', 429);
@@ -356,6 +357,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       const apiKey = store.getUserApiKey(cap.userId);
       if (!apiKey) throw new GatewayError('请先在个人设置中填写你的 OpenAI API 密钥。', 409);
       if (!capabilities.has(rawToken)) throw new GatewayError('任务已取消。', 409);
+      if (store.work?.getRunBinding(cap.userId, cap.runId)) store.work.assertRunCurrent(cap.userId, cap.runId);
       controller = new AbortController(); cap.controllers.add(controller);
       const timeout = setTimeout(() => controller.abort(new DOMException('OpenAI request timed out', 'TimeoutError')), config.upstreamTimeoutMs || 180_000); timeout.unref();
       controller.signal.addEventListener('abort', () => clearTimeout(timeout), { once: true });
