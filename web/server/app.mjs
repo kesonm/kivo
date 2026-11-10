@@ -1,3 +1,4 @@
+import { createRunContext } from './run-context.mjs';
 import express from 'express';
 import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -14,6 +15,8 @@ import { attachmentDisposition, CHAT_UPLOAD_BODY_LIMIT, readChatMultipart } from
 import { adminChatModelCatalog, chatModelOptions, resolveChatSelection } from './chat-models.mjs';
 import { discoverOpenAiModels } from './model-discovery.mjs';
 import { createVoiceService } from './voice.mjs';
+import { createWorkService } from './work.mjs';
+import { createWorkRequests } from './work-requests.mjs';
 
 const scrypt=promisify(scryptCallback);
 const cookieName='cw_session';
@@ -46,6 +49,11 @@ export function loadConfig(env=process.env){
   const dataDir=path.resolve(env.DATA_DIR??'./data');
   const trustedProxyIps=[...new Set((env.TRUST_PROXY_IPS??'').split(',').map(value=>value.trim()).filter(Boolean))];
   if(trustedProxyIps.length>32||trustedProxyIps.some(value=>!isIP(value)))throw new Error('TRUST_PROXY_IPS must contain only explicit IPv4 or IPv6 addresses separated by commas');
+  const workRoutingMode=env.WORK_ROUTING_MODE??'shadow';
+  if(!['off','shadow','enforce'].includes(workRoutingMode))throw new Error('WORK_ROUTING_MODE must be off, shadow or enforce');
+  let workModelBudgets;
+  try { workModelBudgets=JSON.parse(env.WORK_MODEL_BUDGETS??'{}'); } catch { throw new Error('WORK_MODEL_BUDGETS must be a JSON object'); }
+  if(!workModelBudgets||typeof workModelBudgets!=='object'||Array.isArray(workModelBudgets))throw new Error('WORK_MODEL_BUDGETS must be a JSON object');
   return {
     port:int('PORT',3000,1,65535),host:env.HOST??'0.0.0.0',dataDir,
     hostDataDir:env.HOST_DATA_DIR??dataDir,dockerNetwork:env.DOCKER_NETWORK??'codex-workspace-runners',
@@ -54,6 +62,7 @@ export function loadConfig(env=process.env){
     openaiBaseUrl:'https://api.openai.com/v1',gatewayPort:int('GATEWAY_PORT',3001,1,65535),gatewayHost:env.GATEWAY_HOST??'0.0.0.0',
     maxOutputTokens:int('MAX_OUTPUT_TOKENS',8192,256,65536),maxConcurrentRuns:int('MAX_CONCURRENT_RUNS',2,1,16),
     runTimeoutMs:int('RUN_TIMEOUT_MS',600000,1000,3600000),
+    workRoutingMode,workModelBudgets,workContextBytes:int('WORK_CONTEXT_BYTES',393216,8192,500000),
     publicOrigin:env.PUBLIC_ORIGIN??'',cookieSecure:env.COOKIE_SECURE!=='false',trustProxy:trustedProxyIps.length?trustedProxyIps:false,
     adminUsername:env.ADMIN_USERNAME??'admin',adminPassword:env.ADMIN_PASSWORD??'',adminPasswordFile:env.ADMIN_PASSWORD_FILE??'',
     distDir:path.resolve(fileURLToPath(new URL('../dist',import.meta.url))),
@@ -70,6 +79,9 @@ export async function bootstrapAdmin(store,config){
 
 export function createApp({store,runtime,config,local=null,voice=createVoiceService({store}),projects:createProjectsOverride,modelListFetch}){
   const app=express();const projects=createProjectsOverride??createProjects(config);const limits=new Map();const loginFailures=new Map();
+  const workService=createWorkService({store,config,projects,local});
+  const workRequests=createWorkRequests(store);
+  const runContext=store.runContext??=createRunContext(store);
   let uploadsInProgress=0;
   const qrLogin=createQrLogin(store,config.publicOrigin||'https://kivo.iptnet.xyz');
   const dummyHash='scrypt$16384$8$1$00000000000000000000000000000000$'+'00'.repeat(64);
@@ -131,10 +143,13 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
   function ownedProject(req){const project=store.getProject(req.params.id);if(!project||project.userId!==req.user.id)throw new AppError('项目不存在',404);return project;}
   function ownedThread(req){const thread=store.getThread(req.params.id);if(!thread||thread.userId!==req.user.id)throw new AppError('对话不存在',404);return thread;}
   function ownedRun(req){const run=store.getRun(req.params.id);if(!run||run.userId!==req.user.id)throw new AppError('任务不存在',404);return run;}
-  function idle(projectId){if(store.getActiveRunForProject(projectId))throw new AppError('项目任务正在执行，请等待完成或停止任务后操作文件',409);}
-  const fileAction=fn=>async(req,res)=>{const p=ownedProject(req);await projects.withLock(p.id,async()=>{idle(p.id);res.json(await fn(p,req));});};
+  function idle(projectId,{readOnly=false}={}){
+    if(store.getActiveRunForProject(projectId))throw new AppError('项目任务正在执行，请等待完成或停止任务后操作文件',409);
+    if(!readOnly){const owner=store.getProject(projectId)?.userId;if(owner)store.work.assertProjectIdle(owner,projectId);}
+  }
+  const fileAction=fn=>async(req,res)=>{const p=ownedProject(req);await projects.withLock(p.id,async()=>{idle(p.id,{readOnly:req.method==='GET'});res.json(await fn(p,req));});};
 
-  async function startOwnedRun({ thread, project, userId, text, executionText = text, verificationCommand, resumedFromRunId, requestMessageId, tool, model, reasoningEffort, files = [], attachmentsOnly = false }) {
+  async function startOwnedRun({ thread, project, userId, text, executionText = text, verificationCommand, resumedFromRunId, requestMessageId, tool, model, reasoningEffort, chatMode, files = [], attachmentsOnly = false, workPlan, clientRequestId }) {
     if (project) idle(project.id);
     if (!attachmentsOnly && !runtime.providerConfigured(userId)) throw new AppError('请先在个人设置中填写你的 OpenAI API 密钥', 409, 'api_key_required');
     const user = store.getUser(userId);
@@ -143,20 +158,29 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     if (resumedFromRunId) runtime.assertCapacity?.();
     const mode = project?.location ?? (project ? 'cloud' : 'chat');
     const source = mode === 'chat' ? 'hosted' : mode;
-    const run = store.createRun(thread.id, userId, { mode, verificationCommand, resumedFromRunId });
-    let message;
+    const run = store.createRun(thread.id, userId, { mode, verificationCommand, resumedFromRunId,
+      ...(workPlan ? {executionProjectId:project?.id??null}: {}) });
+    let message, runtimeAttempted=false;
     try {
+      if(clientRequestId)workRequests.attach(userId,thread.id,clientRequestId,run.id);
       message = store.appendMessage(thread.id, 'user', text, { uploads: files });
+      if(workPlan&&!workPlan.task)store.work.recordQuestionMessage(userId,thread.id,message.id);
       store.updateRun(run.id, { requestMessageId: requestMessageId ?? message.id });
+      const workContext = workPlan?.task ? await workService.bind({userId,thread,task:workPlan.task,project,run,text:executionText,message,decision:workPlan.decision,model}) : null;
       store.appendRunEvent(run.id, { kind: 'task', source, status: 'started',
-        summary: resumedFromRunId ? '从当前工作区继续' : undefined }, 'task:start');
+        summary: chatMode === 'ultra' ? 'Ultra 多代理' : resumedFromRunId ? '从当前工作区继续' : undefined }, 'task:start');
       if (attachmentsOnly) {
+        runContext.record(run.id,[],{mode:'chat',lifecycle:'attachments'});
         const output = '附件已保存，可以点击文件名下载。当前无法读取这些文件的内容。';
-        store.appendMessage(thread.id, 'assistant', output);
+        const saved=store.appendMessage(thread.id, 'assistant', output);
+        runContext.replies(run.id,[saved.id]);
+        if(workPlan&&!workPlan.task)store.work.recordQuestionMessage(userId,thread.id,saved.id);
         store.appendRunEvent(run.id, { kind: 'task', source, status: 'succeeded', summary: '已保存附件' }, 'task:end',
           { runPatch: { status: 'completed', output } });
       } else {
-        await runtime.start({ run, thread, project, user, text: executionText, tool, model, reasoningEffort, files });
+        await runtime.start({ run, thread: workPlan&&!workPlan.task ? {...thread,projectId:project?.id??null,codexThreadId:null}:thread,
+          project, user, text: executionText, tool, model, reasoningEffort, chatMode, files, workContext,
+          questionContext:workPlan&&!workPlan.task, onExecutionStart:()=>{runtimeAttempted=true;} });
       }
     } catch (error) {
       if (message && !resumedFromRunId) store.deleteMessage(message.id);
@@ -164,6 +188,8 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
         store.appendRunEvent(run.id, { kind: 'task', source, status: 'failed', summary: '启动失败' }, 'task:end',
           { runPatch: { status: 'failed', error: error.message } });
       }
+      const binding=store.work.getRunBinding(userId,run.id);
+      if(binding?.status==='running')store.work.settleStoppedRun(run.id,{status:store.getRun(run.id).status,confirmedStopped:!runtimeAttempted});
       throw error;
     }
     if (thread.title === '新对话') store.updateThread(thread.id, { title: text.slice(0, 50) });
@@ -301,13 +327,77 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
   app.post('/api/projects/:id/commit',auth,fileAction((p,req)=>p.location==='local'?local.projectCall(p,'commit'):projects.commit(p.id,requiredText(req.body.message??'Save workspace changes','提交说明',200))));
   app.get('/api/projects/:id/threads',auth,(req,res)=>{const p=ownedProject(req);res.json({threads:store.listThreads(p.id)});});
   app.post('/api/projects/:id/threads',auth,(req,res)=>{const p=ownedProject(req);res.status(201).json({thread:store.createThread(p.id,req.user.id,requiredText(req.body.title??'新对话','对话标题',100))});});
+  app.get('/api/history',auth,(req,res)=>{checkedQuery(req,['q']);const q=String(req.query.q??'').slice(0,100);res.json({threads:store.db.prepare('SELECT id,project_id projectId,title,created_at createdAt,updated_at updatedAt FROM threads WHERE user_id=? AND instr(lower(title),lower(?))>0 ORDER BY updated_at DESC LIMIT 100').all(req.user.id,q)});});
   app.get('/api/threads',auth,(req,res)=>{checkedQuery(req,[]);res.json({threads:store.listStandaloneThreads(req.user.id)});});
+  app.get('/api/work',auth,(req,res)=>res.json(workService.state(req.user.id)));
+  app.get('/api/work/objects',auth,(req,res)=>res.json({objects:workService.graph.listObjects(req.user.id,{query:req.query.q??'',limit:200})}));
+  app.get('/api/work/tasks',auth,(req,res)=>res.json({tasks:workService.graph.listTasks(req.user.id,{query:req.query.q??'',objectId:req.query.objectId,limit:200})}));
+  app.get('/api/threads/:id/work',auth,(req,res)=>{const thread=ownedThread(req);res.json(workService.state(req.user.id,thread.id));});
+  app.post('/api/threads/:id/route',auth,(req,res)=>{
+    const thread=ownedThread(req);rate(req,'route',60,60000);
+    res.json({route:workService.route(req.user.id,thread.id,requiredText(req.body.text,'消息',24000),req.body.work)});
+  });
+  app.get('/api/work/tasks/:id',auth,(req,res)=>res.json(workService.graph.getTaskContext(req.user.id,req.params.id)));
+  app.post('/api/work/objects',auth,(req,res)=>{
+    if(workService.mode!=='enforce')throw new AppError('工作路由尚未启用',409,'work_observation_only');
+    rate(req,'work-create',30,60000);res.status(201).json({object:workService.graph.createObject(req.user.id,req.body)});
+  });
+  app.patch('/api/work/objects/:id',auth,(req,res)=>{
+    if(workService.mode!=='enforce')throw new AppError('工作路由尚未启用',409,'work_observation_only');
+    res.json({object:workService.graph.updateObject(req.user.id,req.params.id,req.body)});
+  });
+  app.delete('/api/work/objects/:id',auth,(req,res)=>{
+    if(workService.mode!=='enforce')throw new AppError('工作路由尚未启用',409,'work_observation_only');
+    res.json(workService.graph.deleteObject(req.user.id,req.params.id,{expectedVersion:req.body.expectedVersion}));
+  });
+  app.post('/api/work/tasks',auth,(req,res)=>{
+    if(workService.mode!=='enforce')throw new AppError('工作路由尚未启用',409,'work_observation_only');
+    rate(req,'work-create',30,60000);res.status(201).json({task:workService.graph.createTask(req.user.id,req.body)});
+  });
+  app.patch('/api/work/tasks/:id',auth,async(req,res)=>{
+    if(workService.mode!=='enforce')throw new AppError('工作路由尚未启用',409,'work_observation_only');
+    const task=workService.graph.updateTask(req.user.id,req.params.id,req.body);
+    const staleRuns=store.getActiveRunsForUser(req.user.id).filter(run=>store.work.getRunBinding(req.user.id,run.id)?.taskId===task.id);
+    await Promise.all(staleRuns.map(run=>runtime.interrupt(run.id)));
+    res.json({task:workService.graph.getTask(req.user.id,task.id)});
+  });
+  app.post('/api/work/tasks/:id/history',auth,(req,res)=>{
+    if(workService.mode!=='enforce')throw new AppError('工作路由尚未启用',409,'work_observation_only');
+    const task=workService.graph.getTask(req.user.id,req.params.id);
+    if(task.version!==req.body.expectedVersion)throw new AppError('任务版本已变更',409,'work_task_conflict');
+    const result=workService.graph.linkMessages(req.user.id,task.id,{conversationId:req.body.conversationId,startMessageId:req.body.startMessageId,endMessageId:req.body.endMessageId});
+    res.json({ok:true,result});
+  });
+  app.post('/api/work/tasks/:id/cancel',auth,async(req,res)=>{
+    if(workService.mode!=='enforce')throw new AppError('工作路由尚未启用',409,'work_observation_only');
+    const task=workService.graph.getTask(req.user.id,req.params.id);
+    const runs=store.getActiveRunsForUser(req.user.id).filter(run=>store.work.getRunBinding(req.user.id,run.id)?.taskId===task.id);
+    workService.graph.cancelTask(req.user.id,task.id,{expectedVersion:req.body.expectedVersion,reason:'user'});
+    await Promise.all(runs.map(run=>runtime.interrupt(run.id)));
+    res.json({task:workService.graph.getTask(req.user.id,task.id)});
+  });
+  app.post('/api/work/tasks/:id/reconcile',auth,async(req,res)=>{
+    if(workService.mode!=='enforce')throw new AppError('工作路由尚未启用',409,'work_observation_only');
+    const task=store.work.getTask(req.user.id,req.params.id);
+    if(task.version!==req.body.expectedVersion)throw new AppError('任务版本已变更',409,'work_task_conflict');
+    const run=store.getRun(req.body.runId),binding=run&&run.userId===req.user.id?store.work.getRunBinding(req.user.id,run.id):null;
+    if(!binding||binding.taskId!==task.id||run.status==='running')throw new AppError('执行尚未结束或不属于此任务',409);
+    if(run.mode==='cloud')await runtime.assertCloudRunStopped(run.id);
+    else if(run.mode==='local')throw new AppError('请先在本地助手核对执行已停止，当前不提供自动解锁',409,'work_local_reconciliation_required');
+    store.work.confirmRunStopped(req.user.id,run.id,{confirmedStopped:true});
+    store.audit(req.user.id,'work.execution.stop_verified',run.id,'外部操作结果仍需逐项核对；未重放任务');
+    res.json({task:store.work.getTask(req.user.id,task.id)});
+  });
+  app.post('/api/work/tasks/:id/accept',auth,(req,res)=>{
+    if(workService.mode!=='enforce')throw new AppError('工作路由尚未启用',409,'work_observation_only');
+    res.json({task:store.work.acceptTask(req.user.id,req.params.id,{expectedVersion:req.body.expectedVersion,artifactId:req.body.artifactId})});
+  });
   app.post('/api/threads',auth,(req,res)=>{
     rate(req,'create-chat',30,60_000);
     if(Object.keys(req.body).some(key=>key!=='title'))throw new AppError('普通对话仅接受标题');
     res.status(201).json({thread:store.createThread(null,req.user.id,requiredText(req.body.title??'新对话','对话标题',100))});
   });
-  app.get('/api/threads/:id',auth,(req,res)=>{const thread=ownedThread(req);res.json({thread,messages:store.getMessages(thread.id),run:store.getLatestRun(thread.id)});});
+  app.get('/api/threads/:id',auth,(req,res)=>{const thread=ownedThread(req);res.json({thread,messages:store.getMessages(thread.id),run:store.getLatestRun(thread.id),replyLinks:runContext.links(req.user.id,thread.id)});});
   app.get('/api/chat-artifacts/:id',auth,(req,res)=>{
     const artifact=/^[a-f0-9-]{36}$/.test(req.params.id)&&store.getChatArtifact(req.params.id,req.user.id);
     if(!artifact)throw new AppError('文件不存在',404);
@@ -321,7 +411,7 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     rate(req,'turn',30,60_000);
     req.turnThread=ownedThread(req);
     if(!req.is('multipart/form-data'))return next();
-    if(req.turnThread.projectId!==null)throw new AppError('附件分析仅用于普通对话',415);
+    if(req.turnThread.projectId!==null&&workService.mode!=='enforce')throw new AppError('附件分析仅用于普通对话',415);
     if(uploadsInProgress>=4)throw new AppError('服务器正在处理其他附件，请稍后重试',429);
     uploadsInProgress++;
     res.once('close',()=>uploadsInProgress--);
@@ -330,28 +420,60 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
       next(error);
     });
   },async(req,res)=>{
-    const thread=req.turnThread,project=thread.projectId===null?null:store.getProject(thread.projectId);
+    const thread=req.turnThread;
+    let project=thread.projectId===null?null:store.getProject(thread.projectId);
     const multipart=req.is('multipart/form-data');
     const body=multipart?await readChatMultipart(req.body,req.get('content-type')):req.body;
     const files=multipart?body.files:[];
     const tool=body.tool??(files.length?'analyze':undefined);
-    if(thread.projectId!==null&&(body.model!==undefined||body.reasoningEffort!==undefined)) {
-      throw new AppError('项目任务由执行器选择模型和思考档位',400,'chat_model_invalid');
-    }
-    const selection=thread.projectId===null
-      ?resolveChatSelection(store.getChatModelCatalog(config.model),body.model,body.reasoningEffort):{};
-    if(tool!==undefined&&(!chatTools.has(tool)||project))throw new AppError('无效的聊天工具',400);
-    if(tool==='analyze'&&!files.length)throw new AppError('请先添加要分析的附件',400);
     const noPrompt=body.text===undefined||(typeof body.text==='string'&&!body.text.trim());
     const attachmentsOnly=noPrompt&&files.length>0&&files.every(file=>file.kind==='opaque');
     const prompt=attachmentsOnly?'发送了附件。':files.length&&noPrompt?'请分析这些附件，概括要点并指出值得关注的问题。':body.text;
     const text=requiredText(prompt,'消息',24000);
-    if(thread.projectId!==null&&(!project||project.userId!==req.user.id))throw new AppError('项目不存在',404);
+    if(workService.mode!=='enforce'&&store.work.isManagedConversation(req.user.id,thread.id))throw new AppError('此对话已关联独立任务，旧路径不能安全恢复目标。请重新启用工作路由或新建普通对话',409,'work_routing_disabled');
+    let clientRequestId;
+    if(workService.mode==='enforce') {
+      const claimed=workRequests.begin(req.user.id,thread.id,body.requestId,body,files);
+      if(claimed.replay)return res.status(202).json({run:claimed.run,replayed:true});
+      clientRequestId=body.requestId;
+    }
+    try {
+    let workPlan;
+    if(workService.mode==='enforce') {
+      const decision=workService.route(req.user.id,thread.id,text,body.work);
+      if(files.length&&(decision.taskId||decision.status==='new'))throw new AppError('持续任务暂不接受附件，请切换普通问答后上传',409,'work_attachments_unsupported');
+      workPlan=await workService.prepare({userId:req.user.id,thread,text,work:body.work,decision});
+      project=workPlan.project;
+    } else if(workService.mode==='shadow') {
+      // Observational routing cannot change execution or block the legacy path.
+      // Explicit work selections are rejected rather than silently ignored.
+      if(body.work&&Object.keys(body.work).some(key=>key!=='focusRevision'))throw new AppError('当前为观察模式，工作选择尚未接管执行',409,'work_observation_only');
+      try {workService.route(req.user.id,thread.id,text,undefined);}
+      catch(error) {store.audit(req.user.id,'work.shadow_unavailable',thread.id,error.code??'unavailable');}
+    } else if(body.work&&Object.keys(body.work).length)throw new AppError('工作路由已停用',409,'work_routing_disabled');
+    if (project && body.mode!==undefined) throw new AppError('聊天模式仅适用于普通对话',400,'chat_mode_invalid');
+    if(project&&files.length)throw new AppError('附件分析仅用于普通问答',415);
+    if (body.mode==='ultra' && (multipart || (tool!==undefined && tool!=='auto'))) {
+      throw new AppError('Ultra 当前仅支持普通文字聊天，请移除附件或切换到普通思考档位',400,'chat_mode_invalid');
+    }
+    if(project&&!workPlan&&(body.model!==undefined||body.reasoningEffort!==undefined)) {
+      throw new AppError('项目任务由执行器选择模型和思考档位',400,'chat_model_invalid');
+    }
+    const selection=!project
+      ?resolveChatSelection(store.getChatModelCatalog(config.model),body.model,body.reasoningEffort,body.mode):{};
+    if(tool!==undefined&&(!chatTools.has(tool)||(project&&!(workPlan&&tool==='auto'))))throw new AppError('无效的聊天工具',400);
+    if(tool==='analyze'&&!files.length)throw new AppError('请先添加要分析的附件',400);
+    if(project&&project.userId!==req.user.id)throw new AppError('项目不存在',404);
     const verificationCommand=verificationCommandFor(body.verificationCommand,project);
-    const start=()=>startOwnedRun({thread,project,userId:req.user.id,text,tool,...selection,files,attachmentsOnly,verificationCommand});
+    const start=()=>startOwnedRun({thread,project,userId:req.user.id,text,tool:project?undefined:tool,...selection,files,attachmentsOnly,verificationCommand,workPlan,clientRequestId});
     const run=project?await projects.withLock(project.id,start):await start();
     res.status(202).json({run});
+    } catch(error) {
+      if(clientRequestId)workRequests.fail(req.user.id,thread.id,clientRequestId);
+      throw error;
+    }
   });
+  app.get('/api/runs/:id/context',auth,(req,res)=>res.json(runContext.read(req.user.id,ownedRun(req).id)));
   app.get('/api/runs/:id/activity',auth,(req,res)=>{
     const run=ownedRun(req);
     checkedQuery(req,['after']);
@@ -363,6 +485,8 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
   app.post('/api/runs/:id/resume',auth,async(req,res)=>{
     rate(req,'turn',30,60_000);
     const previous=ownedRun(req);
+    const previousBinding=store.work.getRunBinding(req.user.id,previous.id);
+    if(workService.mode!=='enforce'&&(previousBinding||(previous.threadId&&store.work.isManagedConversation(req.user.id,previous.threadId))))throw new AppError('此执行或对话已关联独立任务，请先启用工作路由再继续',409,'work_routing_disabled');
     if (Object.keys(req.body).some(key=>key!=='text')) throw new AppError('无效的续跑请求');
     const note=req.body.text===undefined||req.body.text===''?'':requiredText(req.body.text,'补充说明',4000);
     const project=previous.projectId?store.getProject(previous.projectId):null;
@@ -373,12 +497,13 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
       const successor=store.getResumedRun(previous.id);
       if (successor) return successor;
       const thread=store.getThread(previous.threadId);
-      if (!thread||thread.userId!==req.user.id||thread.projectId!==project.id) throw new AppError('对话不存在',404);
+      if (!thread||thread.userId!==req.user.id||(!previousBinding&&thread.projectId!==project.id)) throw new AppError('对话不存在',404);
       if (store.getLatestRun(thread.id)?.id!==previous.id) throw new AppError('请从该会话的最新任务继续',409,'run_not_latest');
       const original=store.getRunInput(previous.id);
       if (original===null&&!note) throw new AppError('上次任务的目标未完整保存，请填写补充说明后继续',409,'run_input_missing');
-      idle(project.id);
       await runtime.assertCloudRunStopped(previous.id);
+      if(previousBinding)store.work.confirmRunStopped(req.user.id,previous.id,{confirmedStopped:true});
+      idle(project.id);
       const files=(await projects.changedFiles(project.id)).slice(0,20);
       // These paths describe the current working tree, which can also contain user edits.
       const currentChanges=JSON.stringify(files.map(file=>({path:file.path.slice(0,250),status:file.status})));
@@ -393,8 +518,23 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
         previous.verification&&'Previous independent verification status: '+previous.verification.status+'. kivo runs any carried check separately. Do not replay an interrupted check whose result is unknown.',
         note&&'Additional user instructions: '+note,
       ].filter(Boolean).join('\n\n');
+      let workPlan;
+      if(workService.mode==='enforce') {
+        let task=previousBinding?store.work.getTask(req.user.id,previousBinding.taskId):null;
+        if(task&&task.version!==previousBinding.taskVersion)throw new AppError('任务目标已经修订，请选择最新任务继续',409,'work_task_conflict');
+        if(task?.status==='cancelled')throw new AppError('任务已取消，请创建后续工作',409,'work_cancelled');
+        const object=store.work.ensureProject(req.user.id,project.id);
+        if(!task){
+          task=store.work.createTask(req.user.id,{goal:original??note,objects:[{id:object.id,role:'target'}],conversationId:thread.id});
+          if(previous.requestMessageId)store.work.linkMessages(req.user.id,task.id,{conversationId:thread.id,startMessageId:previous.requestMessageId});
+          task=store.work.getTask(req.user.id,task.id);
+        }
+        const focus=store.work.getFocus(req.user.id,thread.id);
+        workPlan={task,project,decision:{status:'matched',intent:'continue',taskId:task.id,objectId:object.id,referenceIds:[],focusRevision:focus.revision,
+          evidence:[{source:'explicit_task',id:task.id,version:task.version}],allowed:['project']}};
+      }
       return startOwnedRun({thread,project,userId:req.user.id,text:note?'继续上次任务：'+note:'继续上次任务',
-        executionText,verificationCommand,resumedFromRunId:previous.id,requestMessageId:original===null?undefined:previous.requestMessageId});
+        executionText,verificationCommand,resumedFromRunId:previous.id,requestMessageId:original===null?undefined:previous.requestMessageId,workPlan});
     });
     res.status(202).json({run});
   });
@@ -461,7 +601,7 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     if(res.headersSent)return next(error);
     const status=error.status??(error.type==='entity.too.large'?413:500);
     if(status>=500)console.error(JSON.stringify({event:'request_error',path:req.path,message:String(error.message).slice(0,500)}));
-    res.status(status>=400&&status<=599?status:500).json({error:status>=500&&!(error instanceof AppError)?'服务器暂时无法完成请求，请稍后重试':error.message,code:error.code??'request_failed'});
+    res.status(status>=400&&status<=599?status:500).json({error:status>=500&&!(error instanceof AppError)?'服务器暂时无法完成请求，请稍后重试':error.message,code:error.code??'request_failed',...(error instanceof AppError&&error.details?{details:error.details}:{})});
   });
   return app;
 }
@@ -475,6 +615,7 @@ export async function startServer(config=loadConfig()){
   const {createRuntime}=await import('./runtime.mjs');
   const local=createLocalBridge({store,config}),runtime=await createRuntime({store,config,local}),voice=createVoiceService({store});
   const app=createApp({store,runtime,config,local,voice});
+  store.work.reconcile();
   const server=app.listen(config.port,config.host,()=>console.log(JSON.stringify({event:'listening',port:config.port,model:config.model,userProvidedKeys:true})));
   server.requestTimeout=120000;server.headersTimeout=15000;
   let closing=false;

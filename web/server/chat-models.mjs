@@ -71,15 +71,26 @@ export function adminChatModelCatalog(catalog) {
   return { ...catalog, models: [...catalog.models, ...available], knownEfforts: Object.fromEntries(knownEfforts) };
 }
 
-export function chatModelOptions(catalog) {
-  return catalog.models.filter(option => option.enabled).map(({ enabled, ...option }) => option);
+function supportsUltra(option) {
+  return option.id === 'gpt-6.1-sol' && option.efforts.includes('max');
 }
 
-export function resolveChatSelection(catalog, model, reasoningEffort) {
+export function chatModelOptions(catalog) {
+  return catalog.models.filter(option => option.enabled).map(({ enabled, ...option }) => ({
+    ...option, ...(supportsUltra(option) ? { supportsUltra: true } : {}),
+  }));
+}
+
+export function resolveChatSelection(catalog, model, reasoningEffort, chatMode) {
   const selected = catalog.models.find(option => option.id === (model === undefined ? catalog.defaultModel : model) && option.enabled);
   if (!selected) throw new ChatModelError('所选聊天模型不可用，请重新选择模型', 'chat_model_invalid');
   if (reasoningEffort !== undefined && !selected.efforts.includes(reasoningEffort)) {
     throw new ChatModelError('此模型不支持所选思考档位，请重新选择', 'chat_reasoning_invalid');
   }
+  if (chatMode === 'ultra') {
+    if (!supportsUltra(selected)) throw new ChatModelError('此模型未启用 Ultra，请选择支持 Ultra 的 GPT-6.1 Sol', 'chat_mode_invalid');
+    return { model: selected.id, reasoningEffort: 'max', chatMode };
+  }
+  if (chatMode !== undefined && chatMode !== 'standard') throw new ChatModelError('无效的聊天模式', 'chat_mode_invalid');
   return { model: selected.id, reasoningEffort: reasoningEffort ?? selected.defaultEffort ?? undefined };
 }

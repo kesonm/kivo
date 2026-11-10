@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { CHAT_GATEWAY_MAX_EVENT_BYTES, GatewayError, makeSseParser } from './gateway.mjs';
 import { imageType } from './chat-files.mjs';
+import { createUltraOutput } from './ultra-output.mjs';
 
 export const CHAT_MAX_MESSAGES = 200;
 export const CHAT_MAX_BYTES = 512 * 1024;
@@ -70,7 +71,7 @@ function requestLoopback({ port, token, payload, signal }) {
   });
 }
 
-export async function streamChat({ port, token, payload, signal, onText, onImage, onCitation, onTool, onActivity }) {
+export async function streamChat({ port, token, payload, signal, chatMode, onText, onImage, onCitation, onTool, onActivity }) {
   const response = await requestLoopback({ port, token, payload, signal });
   if (response.statusCode !== 200) {
     let body = '';
@@ -85,6 +86,7 @@ export async function streamChat({ port, token, payload, signal, onText, onImage
   if (!String(response.headers['content-type'] || '').includes('text/event-stream')) { response.destroy(); throw new GatewayError('模型未返回预期的流式回复。', 502); }
   const partOffsets = new Map(), outputIds = new Map(), seenImages = new Set(), annotations = new Map();
   const activities = new Map();
+  const ultra = chatMode === 'ultra' ? createUltraOutput({ onText, onActivity }) : null;
   let imageBytes = 0, terminal = null, providerError = null;
   function itemKey(event) {
     const index = event.output_index ?? 0;
@@ -162,6 +164,17 @@ export async function streamChat({ port, token, payload, signal, onText, onImage
     }
   }
   const parser = makeSseParser(event => {
+    if (ultra) ultra.event(event);
+    if (['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event.type)) {
+      if (!ultra) for (const [index, item] of (event.response?.output || []).entries()) emitItem(item, index);
+      terminal = event.type;
+      if (event.type === 'response.incomplete') providerError = '本次回复达到模型输出限制或未完整生成，已保留收到的内容。';
+      if (event.type === 'response.failed' || event.type === 'error') {
+        providerError = event.response?.error?.message ?? event.message ?? '模型请求未能完成，请检查个人 API 设置或稍后重试。';
+      }
+      return;
+    }
+    if (ultra) return;
     if (Object.hasOwn(toolProgress, event.type)) onTool?.(toolProgress[event.type]);
     const toolEvent = /^response\.(web_search_call|image_generation_call|code_interpreter_call)\.(in_progress|searching|generating|partial_image|interpreting|completed)$/.exec(event.type);
     if (toolEvent) {
@@ -179,19 +192,13 @@ export async function streamChat({ port, token, payload, signal, onText, onImage
       noteCitation(event.annotation, itemKey(event) + ':' + (event.content_index ?? 0));
     } else if (event.type === 'response.output_text.done' || event.type === 'response.refusal.done') {
       emitText(event.type === 'response.output_text.done' ? event.text : event.refusal, itemKey(event), event.content_index ?? 0);
-    } else if (['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event.type)) {
-      for (const [index, item] of (event.response?.output || []).entries()) emitItem(item, index);
-      terminal = event.type;
-      if (event.type === 'response.incomplete') providerError = '本次回复达到模型输出限制或未完整生成，已保留收到的内容。';
-      if (event.type === 'response.failed' || event.type === 'error') {
-        providerError = event.response?.error?.message ?? event.message ?? '模型请求未能完成，请检查个人 API 设置或稍后重试。';
-      }
     }
   }, { maxEventBytes: CHAT_GATEWAY_MAX_EVENT_BYTES });
   try {
     for await (const chunk of response) parser.feed(chunk);
   } finally {
     response.destroy();
+    ultra?.finish(terminal === 'response.completed');
     for (const activity of activities.values()) {
       if (activity.status === 'started') onActivity({ ...activity, status: 'unknown' });
     }
@@ -202,4 +209,5 @@ export async function streamChat({ port, token, payload, signal, onText, onImage
   }
   if (providerError) throw new GatewayError(providerError, 502);
   if (terminal !== 'response.completed') throw new GatewayError('模型连接已中断，未收到完整回复；未返回的用量会标记为未知。', 502);
+  if (ultra && !ultra.received) throw new GatewayError('Ultra 未返回主代理的最终答复，可以切换到 Max 重试。', 502);
 }

@@ -70,7 +70,15 @@ export async function readChatMultipart(body, contentType) {
   const files = [], tableNames = new Set(), fields = {};
   let total = 0;
   for (const [key, value] of form) {
-    if (['text', 'tool', 'model', 'reasoningEffort'].includes(key) && typeof value === 'string' && !Object.hasOwn(fields, key)) {
+    if (key === 'work' && typeof value === 'string' && !Object.hasOwn(fields, key)) {
+      let selection;
+      try { selection = JSON.parse(value); } catch { throw new AppError('普通问答选择无效'); }
+      if (!selection || selection.intent !== 'question' || Object.keys(selection).some(key => !['intent', 'focusRevision'].includes(key))
+        || !Number.isSafeInteger(selection.focusRevision) || selection.focusRevision < 0) throw new AppError('附件只允许切换到普通问答');
+      fields.work = selection;
+      continue;
+    }
+    if (['text', 'tool', 'model', 'reasoningEffort', 'requestId'].includes(key) && typeof value === 'string' && !Object.hasOwn(fields, key)) {
       fields[key] = value;
       continue;
     }

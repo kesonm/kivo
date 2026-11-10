@@ -12,6 +12,8 @@ kivo 是基于 OpenAI 和 Codex 的多用户网页聊天与代码工作台。
 
 网页源码位于 [`web/`](web/)，部署与配置见 [网页服务文档](web/README.md)。本仓库保留 [OpenAI Codex](https://github.com/openai/codex) 上游代码及提交历史；上游介绍见 [README.upstream.md](README.upstream.md)。kivo 是独立项目，并非 OpenAI 官方服务。
 
+跨会话任务、目标选择、版本化产物和执行恢复的阶段 1–3 基础实现见 [工作连续性说明](web/WORK_CONTINUITY.md)。启用模式与回滚须遵循该文档；尚未实现原生自动压缩、持久多 Worker 或可信外部事件入口。
+
 ## 部署
 
 采用 Node.js 24、React、SQLite、Docker 和 Nginx。构建和验收在部署服务器执行，配置与用户数据保存在仓库之外。详细步骤见 [web/README.md](web/README.md)。

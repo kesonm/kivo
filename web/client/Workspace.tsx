@@ -6,9 +6,11 @@ import { Icon, Logo } from './icons';
 import { getDirtyFile } from './navigation';
 import { Files } from './Files';
 import { LocalApprovals } from './Local';
-import { PreviousTask, TaskActivity, VerificationCard, useRunActivity } from './RunActivity';
+import { PreviousTask, VerificationCard, useRunActivity } from './RunActivity';
+import { RunDetails } from './RunContext';
+import { WorkContext, taskTarget } from './WorkContext';
 import { ErrorBox, Loading, StatusBadge, useDialog, useNotice } from './ui';
-import type { ChatModelOption, ChatTool, Message, Project, ReasoningEffort, Run, RunEvent, RunVerification, Thread, User } from './types';
+import type { ChatModelOption, ChatTool, Message, Project, ReasoningEffort, Run, RunEvent, RunVerification, Thread, User, WorkRoute, WorkSelection, WorkSnapshot } from './types';
 
 const chatFileCount = 4;
 const chatFileBytes = 8 * 1024 * 1024;
@@ -23,11 +25,12 @@ const chatStarters = [
   { icon: 'edit', title: '润色文字', text: '我想润色一段文字。请先问我文字的用途和希望的语气。' },
 ];
 
-export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged, user, providerConfigured, model, defaultChatModel, chatModels, refreshSession, onRenameProject, onDeleteProject, onOpenAccount, onOpenLocal }: {
+export function Workspace({ project: conversationProject, threadId, onThreadCreated, onThreadsChanged, user, providerConfigured, model, defaultChatModel, chatModels, refreshSession, onRenameProject, onDeleteProject, onOpenAccount, onOpenLocal }: {
   project: Project | null; threadId: string | null; onThreadCreated: (thread: Thread) => void; onThreadsChanged: () => void;
   user: User; providerConfigured: boolean; model?: string; defaultChatModel?: string; chatModels?: ChatModelOption[]; refreshSession: () => Promise<void>;
   onRenameProject: () => void; onDeleteProject: () => void; onOpenAccount: () => void; onOpenLocal: () => void;
 }) {
+  const [replyLinks,setReplyLinks] = useState<{messageId:string;runId:string}[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [run, setRun] = useState<Run | null>(null);
   const [title, setTitle] = useState('新的对话');
@@ -39,6 +42,7 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const [verificationCommand, setVerificationCommand] = useState('');
   const [selectedTool, setSelectedTool] = useState<Exclude<ChatTool, 'analyze'>>('auto');
   const [selectedModel, setSelectedModel] = useState<string>();
+  const [ultraSelected, setUltraSelected] = useState(false);
   const [modelEfforts, setModelEfforts] = useState<Partial<Record<string, ReasoningEffort>>>({});
   const [attachments, setAttachments] = useState<File[]>([]);
   const [error, setError] = useState('');
@@ -48,6 +52,12 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const [projectMenu, setProjectMenu] = useState(false);
   const [revision, setRevision] = useState(0);
   const [scrolledUp, setScrolledUp] = useState(false);
+  const [work, setWork] = useState<WorkSnapshot | null>(null);
+  const [workSelection, setWorkSelection] = useState<WorkSelection>();
+  const [workRoute, setWorkRoute] = useState<WorkRoute | null>(null);
+  const [workError, setWorkError] = useState('');
+  const [ownedProjects, setOwnedProjects] = useState<Project[]>([]);
+  const [voiceBusy, setVoiceBusy] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const verificationInput = useRef<HTMLInputElement>(null);
@@ -55,13 +65,27 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const threadRef = useRef(threadId); threadRef.current = threadId;
   const newlyCreatedThread = useRef<string | null>(null);
   const loadSequence = useRef(0);
+  const workSequence = useRef(0);
+  const workRef = useRef(work); workRef.current = work;
   const mounted = useRef(true);
   const sendingRef = useRef(false);
+  const sendAttempt = useRef<{ fingerprint: string; files: File[]; requestId: string; work?: WorkSelection | { focusRevision: number }; body?: unknown } | null>(null);
   const notify = useNotice(); const ask = useDialog();
+  const selectedWorkTask = workSelection?.taskId ? work?.tasks.find(task => task.id === workSelection.taskId)
+    ?? (work?.task?.id === workSelection.taskId ? work.task : undefined) : undefined;
+  const selectedWorkObject = workSelection?.objectId ? work?.objects.find(object => object.id === workSelection.objectId) : taskTarget(selectedWorkTask);
+  const selectedProject = selectedWorkObject?.projectId ? ownedProjects.find(item => item.id === selectedWorkObject.projectId) ?? null : null;
+  const explicitStandalone = !!workSelection && (workSelection.intent === 'question' || !workSelection.objectId && ['new', 'fork', 'reference', 'compare'].includes(workSelection.intent));
+  const focusedProject = work?.executionScope === 'question' ? null : work?.task ? work.executionProject ?? null : conversationProject;
+  const routedProject = workSelection ? explicitStandalone ? null : selectedWorkObject ? selectedProject : focusedProject : focusedProject;
+  const project = work?.mode === 'enforce'
+    ? run?.status === 'running' ? ownedProjects.find(item => item.id === run.projectId) ?? (run.projectId ? routedProject : null) : routedProject
+    : conversationProject;
+  const hasWorkContext = work?.mode === 'enforce' && (workSelection ? workSelection.intent !== 'question' : !!work.task);
   const running = run?.status === 'running';
   const composerBusy = loading || sending || running;
   const cloudProject = !!project && project.location !== 'local';
-  const resumable = cloudProject && run?.mode === 'cloud' && run.status === 'interrupted';
+  const resumable = cloudProject && run?.mode === 'cloud' && run.status === 'interrupted' && run.projectId === project?.id && !workSelection;
   const { events: activity, error: activityError, add: addActivity, refresh: refreshActivity } = useRunActivity(run?.mode ? run.id : undefined);
   const chatTool = attachments.length ? 'analyze' : selectedTool;
   const modelOptions: ChatModelOption[] = chatModels ?? (model ? [{ id: model, label: model, description: '' }] : []);
@@ -69,20 +93,42 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
     ?? modelOptions.find(option => option.id === (defaultChatModel ?? model)) ?? modelOptions[0];
   const savedEffort = chatModel && modelEfforts[chatModel.id];
   const reasoningEffort = savedEffort && chatModel?.efforts?.includes(savedEffort) ? savedEffort : chatModel?.defaultEffort ?? undefined;
+  const ultraAvailable = !!chatModel?.supportsUltra && chatTool === 'auto';
+  const ultra = ultraSelected && ultraAvailable;
+  useEffect(() => { if (!ultraAvailable) setUltraSelected(false); }, [ultraAvailable]);
   function selectEffort(effort?: ReasoningEffort) {
+    setUltraSelected(false);
     if (chatModel) setModelEfforts(previous => ({ ...previous, [chatModel.id]: effort }));
   }
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; ++loadSequence.current; };
+    return () => { mounted.current = false; ++loadSequence.current; ++workSequence.current; };
   }, []);
+  const refreshWork = useCallback(async () => {
+    const id = threadRef.current;
+    const sequence = ++workSequence.current;
+    try {
+      const [snapshot, projects] = await Promise.all([
+        api<WorkSnapshot>(id ? `/api/threads/${enc(id)}/work` : '/api/work'),
+        api<{ projects: Project[] }>('/api/projects'),
+      ]);
+      if (!mounted.current || sequence !== workSequence.current || threadRef.current !== id) return;
+      if (getDirtyFile() && workRef.current?.focus && snapshot.focus?.revision !== workRef.current.focus.revision) {
+        setWorkError('工作焦点已更新。请先保存或关闭正在编辑的文件，再重新加载工作目标。');
+        return;
+      }
+      setWork(snapshot); setOwnedProjects(projects.projects); setWorkError('');
+    } catch (error) { if (mounted.current && sequence === workSequence.current) setWorkError(messageOf(error)); }
+  }, []);
+  useEffect(() => { void refreshWork(); }, [threadId, revision, run?.status, refreshWork]);
+  useEffect(() => { setPanelOpen(false); setPanelTab('files'); setProjectMenu(false); }, [project?.id]);
   const loadThread = useCallback(async (id: string, initial = false) => {
     const sequence = ++loadSequence.current;
     if (initial) setLoading(true);
     try {
-      const result = await api<{ thread: Thread; messages: Message[]; run: Run | null }>(`/api/threads/${enc(id)}`);
+      const result = await api<{ thread: Thread; messages: Message[]; run: Run | null; replyLinks?: {messageId:string;runId:string}[] }>(`/api/threads/${enc(id)}`);
       if (!mounted.current || sequence !== loadSequence.current || threadRef.current !== id) return;
-      setMessages(result.messages); setRun(result.run); setTitle(result.thread.title); setError('');
+      setMessages(result.messages); setReplyLinks(result.replyLinks || []); setRun(result.run); setTitle(result.thread.title); setError('');
     } catch (e) { if (mounted.current && sequence === loadSequence.current) setError(messageOf(e)); }
     finally { if (mounted.current && sequence === loadSequence.current) setLoading(false); }
   }, []);
@@ -94,8 +140,11 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       setVerificationCommand('');
       setAttachments([]);
       setSelectedTool('auto');
+      setUltraSelected(false);
+      setWorkSelection(undefined); setWorkRoute(null); setWork(null); setWorkError('');
+      sendAttempt.current = null;
     }
-    newlyCreatedThread.current = null; setRun(null); setMessages([]); setTitle('新的对话');
+    newlyCreatedThread.current = null; setRun(null); setMessages([]); setReplyLinks([]); setTitle('新的对话');
     if (threadId) void loadThread(threadId, true);
     else { ++loadSequence.current; setLoading(false); }
   }, [threadId, loadThread]);
@@ -134,9 +183,9 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
     source.onerror = () => {
       if (finished) return;
       setConnectionLost(true);
-      void api<{ thread: Thread; messages: Message[]; run: Run | null }>(`/api/threads/${enc(currentThreadId)}`).then(result => {
+      void api<{ thread: Thread; messages: Message[]; run: Run | null; replyLinks?: {messageId:string;runId:string}[] }>(`/api/threads/${enc(currentThreadId)}`).then(result => {
         if (finished || !mounted.current || threadRef.current !== currentThreadId || result.run?.status === 'running') return;
-        finished = true; source.close(); setMessages(result.messages); setRun(result.run); setConnectionLost(false); setStopping(false); setRevision(old => old + 1); void refreshSession().catch(() => undefined); onThreadsChanged();
+        finished = true; source.close(); setMessages(result.messages); setReplyLinks(result.replyLinks || []); setRun(result.run); setConnectionLost(false); setStopping(false); setRevision(old => old + 1); void refreshSession().catch(() => undefined); onThreadsChanged();
         void refreshActivity();
       }).catch(() => undefined);
     };
@@ -151,6 +200,7 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
 
   function attachFiles(files: File[]) {
     if (!files.length || composerBusy) return;
+    if (hasWorkContext) { notify('请先在工作上下文中切换到普通问答，再添加附件。', 'info'); return; }
     const empty = files.find(file => !file.size);
     if (empty) { notify(`附件「${empty.name}」是空文件。`, 'error'); return; }
     const next = [...attachments, ...files];
@@ -160,6 +210,7 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
     }
     setAttachments(next);
     setSelectedTool('auto');
+    setUltraSelected(false);
     textarea.current?.focus();
   }
 
@@ -175,34 +226,62 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       setError(''); pinBottom.current = true;
       let id = threadId;
       if (!id) {
-        const created = await api<{ thread: Thread }>(project ? `/api/projects/${enc(project.id)}/threads` : '/api/threads', { method: 'POST', body: { title: text.slice(0, 60) || '分析附件' } });
+        const created = await api<{ thread: Thread }>(conversationProject ? `/api/projects/${enc(conversationProject.id)}/threads` : '/api/threads', { method: 'POST', body: { title: text.slice(0, 60) || '分析附件' } });
         id = created.thread.id;
         if (mounted.current) { threadRef.current = id; newlyCreatedThread.current = id; }
         onThreadCreated(created.thread);
       }
       const check = cloudProject ? verificationCommand.trim() : '';
-      let body: { text: string; tool?: ChatTool; model?: string; reasoningEffort?: ReasoningEffort; verificationCommand?: string } | FormData = project
+      let workRequest = work?.mode === 'enforce' ? workSelection ?? { focusRevision: work.focus?.revision ?? 0 } : undefined;
+      let requestId: string | undefined;
+      if (work?.mode === 'enforce') {
+        // Keep the same request identity and focus version after an uncertain
+        // network result. A draft/selection change creates a distinct request.
+        const fingerprint = JSON.stringify({ conversationId: id, text, work: workSelection, tool: chatTool, model: chatModel?.id, reasoningEffort, ultra, check });
+        const previous = sendAttempt.current;
+        if (!previous || previous.fingerprint !== fingerprint || previous.files.length !== attachments.length || previous.files.some((file, index) => file !== attachments[index])) {
+          sendAttempt.current = { fingerprint, files: [...attachments], requestId: crypto.randomUUID(), work: workRequest };
+        }
+        requestId = sendAttempt.current!.requestId;
+        workRequest = sendAttempt.current!.work;
+      }
+      let body: { text: string; tool?: ChatTool; model?: string; mode?: 'ultra'; reasoningEffort?: ReasoningEffort; verificationCommand?: string; requestId?: string; work?: WorkSelection | { focusRevision: number } } | FormData = project
         ? { text, ...(check ? { verificationCommand: check } : {}) }
-        : { text, tool: chatTool, model: chatModel?.id, reasoningEffort };
+        : { text, tool: chatTool, model: chatModel?.id, ...(ultra ? { mode: 'ultra' } : { reasoningEffort }) };
+      if (workRequest) body.work = workRequest;
+      if (requestId) body.requestId = requestId;
       if (hasFiles) {
         const form = new FormData();
         form.set('text', text);
         form.set('tool', 'analyze');
         if (chatModel) form.set('model', chatModel.id);
         if (reasoningEffort) form.set('reasoningEffort', reasoningEffort);
+        if (workSelection?.intent === 'question') form.set('work', JSON.stringify({ intent: 'question', focusRevision: workRequest?.focusRevision ?? work?.focus?.revision ?? 0 }));
+        if (requestId) form.set('requestId', requestId);
         for (const file of attachments) form.append('files', file);
         body = form;
       }
-      const result = await api<{ run: Run }>(`/api/threads/${enc(id)}/turns`, { method: 'POST', body });
+      if (requestId && sendAttempt.current && sendAttempt.current.body === undefined) sendAttempt.current.body = body;
+      const requestBody = requestId ? sendAttempt.current?.body ?? body : body;
+      const result = await api<{ run: Run }>(`/api/threads/${enc(id)}/turns`, { method: 'POST', body: requestBody });
       onThreadsChanged();
       if (!mounted.current || threadRef.current !== id) return;
       setInput(''); setVerificationOpen(false); setVerificationCommand('');
+      sendAttempt.current = null;
       setAttachments([]); setSelectedTool('auto'); setRun(result.run);
+      setWorkSelection(undefined); setWorkRoute(null); void refreshWork();
+      setUltraSelected(false);
       await loadThread(id); void refreshSession().catch(() => undefined);
     } catch (e) {
       if (mounted.current) {
         setError(messageOf(e));
-        if (!project && e instanceof ApiError && (e.code === 'chat_model_invalid' || e.code === 'chat_reasoning_invalid')) {
+        if (e instanceof ApiError && e.details && typeof e.details === 'object' && 'route' in e.details) {
+          const route = (e.details as { route?: WorkRoute }).route;
+          if (route && ['matched', 'new', 'ambiguous', 'unresolved', 'blocked'].includes(route.status)) setWorkRoute(route);
+        }
+        if (e instanceof ApiError && e.code?.startsWith('work_')) void refreshWork();
+        if (!project && e instanceof ApiError && (e.code === 'chat_model_invalid' || e.code === 'chat_reasoning_invalid' || e.code === 'chat_mode_invalid')) {
+          setUltraSelected(false);
           void refreshSession().catch(() => undefined);
         }
       } else onThreadsChanged();
@@ -259,6 +338,14 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
     if (nextOpen) setPanelOpen(true);
     else closePanel();
   }
+  async function changeWorkSelection(selection?: WorkSelection) {
+    if (composerBusy || voiceBusy) return;
+    if (attachments.length && selection?.intent !== 'question') { notify('请先移除附件，再选择工作任务。', 'info'); return; }
+    const id = threadRef.current;
+    if (getDirtyFile() && !await ask({ title: '切换工作上下文？', description: `${getDirtyFile()} 尚有未保存的编辑。切换前请先保存，或确认放弃编辑。`, confirm: '放弃编辑并切换', danger: true })) return;
+    if (!mounted.current || threadRef.current !== id || sendingRef.current) return;
+    closePanel(); setWorkSelection(selection); setWorkRoute(null); setVerificationCommand('');
+  }
   const lastAssistant = [...messages].reverse().find(message => message.role === 'assistant');
   const showRunOutput = run && (running || (!!run.output && lastAssistant?.content !== run.output));
   const emptyConversation = !loading && messages.length === 0 && !run;
@@ -287,9 +374,12 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       </div>
     </form> : <ChatComposer draft={input} setDraft={setInput} textarea={textarea} attachments={attachments} onAttach={attachFiles}
       onRemove={index => setAttachments(files => files.filter((_, i) => i !== index))} tool={chatTool} onTool={setSelectedTool}
-      model={chatModel} models={modelOptions} onModel={setSelectedModel} effort={reasoningEffort} onEffort={selectEffort}
+      model={chatModel} models={modelOptions} onModel={id => { setSelectedModel(id); setUltraSelected(false); }}
+      effort={ultra ? 'max' : reasoningEffort} onEffort={selectEffort} ultra={ultra} ultraAvailable={ultraAvailable} onUltra={setUltraSelected}
       onOpenReasoning={() => void refreshSession().catch(() => undefined)} threadId={threadId} providerConfigured={providerConfigured}
-      busy={composerBusy} running={running} sending={sending} stopping={stopping} onSend={send} onStop={() => void interrupt()} onOpenLocal={onOpenLocal} />}
+      busy={composerBusy} running={running} sending={sending} stopping={stopping} onSend={send} onStop={() => void interrupt()} onOpenLocal={onOpenLocal}
+      workRestricted={hasWorkContext} voiceRestricted={work?.mode === 'enforce' && !!work.task} onBusyChange={setVoiceBusy} />}
+    {hasWorkContext && !project && <p className="work-composer-note">正在处理持续任务。附件和实时语音请在工作上下文中切换到普通问答后使用。</p>}
     <div className="composer-footer">{project && <button type="button" className="composer-project" onClick={() => void changePanel(true)} title="查看项目文件"><Icon name="folder" size={13} /><span>{project.name}{project.location === 'local' ? ' · 本地电脑' : ' · 云端'}</span></button>}
       {cloudProject && <button type="button" className="composer-verification-toggle" aria-expanded={verificationOpen} aria-controls={verificationOpen ? 'project-verification-command' : undefined}
         onClick={() => setVerificationOpen(open => !open)} disabled={composerBusy}><Icon name="check" size={13} />{verificationCommand.trim() ? '已填写验收命令' : '验收命令'}</button>}
@@ -302,9 +392,11 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
         {project && <><div className="workspace-mode-switch" role="group" aria-label="界面模式"><button className={!panelOpen ? 'selected' : ''} aria-pressed={!panelOpen} onClick={() => void changePanel(false)}><Icon name="chat" size={15} />聊天</button><button className={panelOpen ? 'selected' : ''} aria-pressed={panelOpen} onClick={() => void changePanel(true)}><Icon name="code" size={16} />工作</button></div>
         <div className="workspace-header-actions">
           <button className={'button small-button file-panel-toggle' + (panelOpen ? ' subtle active' : ' secondary')} onClick={() => void changePanel(!panelOpen)} title="项目文件与代码差异" aria-expanded={panelOpen}><Icon name="panel" size={16} /><span>文件与差异</span></button>
-          <div className="menu-anchor"><button className="icon-button" aria-label="项目操作" aria-expanded={projectMenu} onClick={() => setProjectMenu(!projectMenu)}><Icon name="more" /></button>{projectMenu && <><button className="menu-dismiss" aria-label="关闭项目菜单" onClick={() => setProjectMenu(false)} /><div className="dropdown-menu"><button onClick={() => { setProjectMenu(false); onRenameProject(); }}><Icon name="edit" size={16} />重命名项目</button><button className="danger-text" disabled={running} onClick={() => { setProjectMenu(false); onDeleteProject(); }}><Icon name="trash" size={16} />删除项目</button></div></>}</div>
+          {project.id === conversationProject?.id && <div className="menu-anchor"><button className="icon-button" aria-label="项目操作" aria-expanded={projectMenu} onClick={() => setProjectMenu(!projectMenu)}><Icon name="more" /></button>{projectMenu && <><button className="menu-dismiss" aria-label="关闭项目菜单" onClick={() => setProjectMenu(false)} /><div className="dropdown-menu"><button onClick={() => { setProjectMenu(false); onRenameProject(); }}><Icon name="edit" size={16} />重命名项目</button><button className="danger-text" disabled={running} onClick={() => { setProjectMenu(false); onDeleteProject(); }}><Icon name="trash" size={16} />删除项目</button></div></>}</div>}
         </div></>}
       </header>
+      <WorkContext snapshot={work} selection={workSelection} onChange={selection => void changeWorkSelection(selection)} route={workRoute} onRoute={setWorkRoute} threadId={threadId} draft={input} busy={composerBusy || voiceBusy}
+        loadError={workError} onRefresh={() => void refreshWork()} />
       {!providerConfigured && <div className="provider-banner"><Icon name="key" size={16} /><span>填写你自己的 OpenAI API Key，即可开始对话。</span><button type="button" className="text-button" onClick={onOpenAccount}>前往账户设置</button></div>}
       <div className={'chat-stage' + (emptyConversation ? ' chat-stage-empty' : '')}>
         {emptyConversation ? <div className="chat-welcome"><h1>今天想做些什么？</h1></div> : <div className="messages-scroll" ref={scroll} onScroll={() => { if (scroll.current) { const near = scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight < 160; pinBottom.current = near; setScrolledUp(!near); } }}>
@@ -326,12 +418,13 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
                   {(message.content || !!message.citations?.length) && <Markdown content={message.content} citations={message.citations} />}
                   {!!message.artifacts?.length && <ChatImages artifacts={message.artifacts} onLoad={followOutput} />}
                 </>}
+                {message.role === 'assistant' && replyLinks.find(link=>link.messageId===message.id) && <RunDetails key={replyLinks.find(link=>link.messageId===message.id)!.runId} runId={replyLinks.find(link=>link.messageId===message.id)!.runId} live={run?.id===replyLinks.find(link=>link.messageId===message.id)!.runId?run:undefined} events={activity} error={activityError} refresh={refreshActivity}/>}
               </div>
             </article>)}
             {showRunOutput && <article className="chat-message message-assistant"><div className="message-avatar assistant-avatar logo-container"><Logo /></div><div className="message-main"><div className="message-heading"><strong>kivo</strong><StatusBadge status={run.status} /></div>{run.output ? <Markdown content={run.output} /> : <div className="thinking"><span /><span /><span /><small>正在处理你的任务</small></div>}</div></article>}
             {run && <>
-              <VerificationCard run={run} onOpenDiff={project && !running ? openCurrentDiff : undefined} />
-              <TaskActivity key={run.id} run={run} events={activity} error={activityError} refresh={refreshActivity} />
+              <VerificationCard run={run} onOpenDiff={project && run.projectId === project.id && !running ? openCurrentDiff : undefined} />
+              {!replyLinks.some(link=>link.runId===run.id) && <RunDetails key={run.id} runId={run.id} live={run} events={activity} error={activityError} refresh={refreshActivity} />}
               {run.resumedFromRunId && <PreviousTask key={run.resumedFromRunId} runId={run.resumedFromRunId} />}
             </>}
             {running && run && project?.location === 'local' && <LocalApprovals runId={run.id} />}

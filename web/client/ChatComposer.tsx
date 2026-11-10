@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useId, useRef, useState, type ClipboardEvent, type CSSProperties, type FormEvent, type KeyboardEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type RefObject } from 'react';
 import { AttachmentChips } from './ChatContent';
 import { Icon } from './icons';
 import { effortLabels } from './reasoning';
+import { ReasoningControls } from './ReasoningControls';
 import { VoiceControls } from './VoiceControls';
 import type { ChatModelOption, ChatTool, ReasoningEffort } from './types';
 
@@ -25,6 +26,9 @@ type ComposerProps = {
   onModel: (model: string) => void;
   effort?: ReasoningEffort;
   onEffort: (effort?: ReasoningEffort) => void;
+  ultra: boolean;
+  ultraAvailable: boolean;
+  onUltra: (enabled: boolean) => void;
   onOpenReasoning: () => void;
   threadId: string | null;
   providerConfigured: boolean;
@@ -35,9 +39,12 @@ type ComposerProps = {
   onSend: (event?: FormEvent) => void;
   onStop: () => void;
   onOpenLocal: () => void;
+  workRestricted?: boolean;
+  voiceRestricted?: boolean;
+  onBusyChange?: (busy: boolean) => void;
 };
 
-export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach, onRemove, tool, onTool, model, models, onModel, effort, onEffort, onOpenReasoning, threadId, providerConfigured, busy, running, sending, stopping, onSend, onStop, onOpenLocal }: ComposerProps) {
+export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach, onRemove, tool, onTool, model, models, onModel, effort, onEffort, ultra, ultraAvailable, onUltra, onOpenReasoning, threadId, providerConfigured, busy, running, sending, stopping, onSend, onStop, onOpenLocal, workRestricted = false, voiceRestricted = false, onBusyChange }: ComposerProps) {
   const [menu, setMenu] = useState<'tools' | 'reasoning' | 'models' | null>(null);
   const [opensBelow, setOpensBelow] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
@@ -54,12 +61,14 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
   const efforts = model?.efforts ?? [];
   const effortIndex = Math.max(0, effort ? efforts.indexOf(effort) : 0);
   const effortLabel = efforts.length ? effortLabels[efforts[effortIndex]] : '由模型决定';
+  const modeLabel = ultra ? 'Ultra 多代理' : effortLabel;
   const modelMenuOpen = (menu === 'reasoning' || menu === 'models') && !blocked;
   const nativeVoiceBlocked = typeof navigator !== 'undefined' && /\bkivo-iOS\//i.test(navigator.userAgent);
   const updateVoiceBusy = useCallback((value: boolean) => {
     setVoiceBusy(value);
     if (value) setMenu(null);
   }, []);
+  useEffect(() => { onBusyChange?.(voiceBusy); }, [voiceBusy, onBusyChange]);
 
   useEffect(() => {
     if (!menu || blocked) return;
@@ -173,11 +182,11 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
           }
         }} />
       <div className="composer-controls">
-        <button ref={modelTrigger} type="button" className="composer-model-picker" title={`${modelLabel} · 思考程度 ${effortLabel}`} aria-label={`选择思考程度，当前模型 ${modelLabel}，${effortLabel}`} aria-haspopup="dialog"
+        <button ref={modelTrigger} type="button" className={'composer-model-picker' + (ultra ? ' ultra-active' : '')} title={`${modelLabel} · ${modeLabel}`} aria-label={`选择思考程度，当前模型 ${modelLabel}，${modeLabel}`} aria-haspopup="dialog"
           aria-expanded={modelMenuOpen} aria-controls={modelMenuOpen ? menuId : undefined} disabled={blocked || !models.length} onClick={() => toggleMenu('reasoning')}>
-          <span>{modelLabel}</span><Icon name="down" size={13} />
+          <span>{ultra ? 'Ultra' : modelLabel}</span><Icon name="down" size={13} />
         </button>
-        <VoiceControls disabled={busy || !providerConfigured || nativeVoiceBlocked} disabledReason={nativeVoiceBlocked ? '请在浏览器中使用语音功能' : undefined}
+        <VoiceControls disabled={busy || !providerConfigured || nativeVoiceBlocked || workRestricted || voiceRestricted} disabledReason={workRestricted || voiceRestricted ? '请先发送一条普通问答结束工作上下文，再使用语音功能' : nativeVoiceBlocked ? '请在浏览器中使用语音功能' : undefined}
           hasDraft={hasDraft || running} threadId={threadId} onDictation={insertDictation} onBusyChange={updateVoiceBusy} />
         {running ? <button type="button" className="send-button stop-button" title="停止任务" aria-label="停止任务" disabled={stopping} onClick={onStop}>
           {stopping ? <span className="spinner" /> : <Icon name="stop" size={17} />}
@@ -194,8 +203,8 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
       }}
       className={`composer-popover composer-popover-${menu} ${opensBelow ? 'popover-below' : 'popover-above'}`}>
       {menu === 'tools' ? <>
-        <button type="button" role="menuitem" disabled={attachments.length >= maxFiles} onClick={() => { setMenu(null); fileInput.current?.click(); }}>
-          <Icon name="file" size={17} /><span className="composer-option-title">添加照片和文件</span><span className="composer-option-description">上传、粘贴与分析附件</span>
+        <button type="button" role="menuitem" disabled={attachments.length >= maxFiles || workRestricted} onClick={() => { setMenu(null); fileInput.current?.click(); }}>
+          <Icon name="file" size={17} /><span className="composer-option-title">添加照片和文件</span><span className="composer-option-description">{workRestricted ? '切换到普通问答后使用' : '上传、粘贴与分析附件'}</span>
         </button>
         {toolOptions.map(option => <button type="button" role="menuitem" key={option.id} disabled={attachments.length > 0} onClick={() => { onTool(option.id); setMenu(null); textarea.current?.focus(); }}>
           <Icon name={option.icon} size={17} /><span className="composer-option-title">{option.label}</span><span className="composer-option-description">{option.description}</span>
@@ -204,32 +213,8 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
         <button type="button" role="menuitem" onClick={() => { setMenu(null); onOpenLocal(); }}>
           <Icon name="folder" size={17} /><span className="composer-option-title">打开本地文件夹</span><span className="composer-option-description">进入本地项目对话</span>
         </button>
-      </> : menu === 'reasoning' ? <>
-        <div className="reasoning-heading">
-          <Icon name="spark" size={15} />
-          <div className="reasoning-selection">
-            <span className="reasoning-value">{effortLabel}</span>
-            <button type="button" className="reasoning-model-link" aria-haspopup="menu" aria-label={`切换模型，当前为 ${modelLabel}`} onClick={() => setMenu('models')}>
-              <span>{modelLabel}</span><Icon name="chevron" size={12} />
-            </button>
-          </div>
-          <button type="button" className="reasoning-reset" title="恢复默认思考档位" aria-label="恢复默认思考档位"
-            disabled={efforts.length < 2 || effort === model?.defaultEffort} onClick={() => {
-              onEffort();
-              menuContent.current?.querySelector('input')?.focus();
-            }}>
-            <Icon name="refresh" size={14} />
-          </button>
-        </div>
-        {efforts.length > 0 && <div className="reasoning-track" style={{ '--reasoning-position': efforts.length > 1 ? effortIndex / (efforts.length - 1) : 0 } as CSSProperties}>
-          <div className="reasoning-marks" aria-hidden="true">
-            {efforts.map((level, index) => <span key={level} className={index <= effortIndex ? 'filled' : undefined} />)}
-          </div>
-          <input aria-label="思考程度" aria-valuetext={effortLabel} type="range" min={0} max={Math.max(1, efforts.length - 1)} step={1}
-            value={effortIndex} disabled={efforts.length < 2} onChange={event => onEffort(efforts[Number(event.currentTarget.value)])} />
-        </div>}
-        {!efforts.length && <p className="reasoning-unavailable">此模型未配置思考档位</p>}
-      </> : <>
+      </> : menu === 'reasoning' ? <ReasoningControls key={model?.id} model={model} effort={effort} onEffort={onEffort}
+        onPickModel={() => setMenu('models')} ultra={ultra} ultraAvailable={ultraAvailable} onUltra={onUltra} /> : <>
         <button type="button" role="menuitem" className="reasoning-back" onClick={() => setMenu('reasoning')}>
           <Icon name="chevron" size={13} />返回思考程度
         </button>

@@ -38,7 +38,7 @@ test('workspace accounting does not follow symlinks and bounds bytes and entry c
 
 test('missing provider key fails before docker startup', async () => {
   let launched = false;
-  const runtime = createRuntime({ store: { getUser: () => ({ id: 'u', disabled: false }), getUserApiKey: () => null, getApiKeyMetadata: () => ({ configured: false }) }, config: { apiKey: 'GLOBAL_MUST_NOT_USE' }, spawnImpl: () => { launched = true; throw new Error('should not launch'); } });
+  const runtime = createRuntime({ store: { runContext: { record() {}, engine() {}, replies() {} }, getUser: () => ({ id: 'u', disabled: false }), getUserApiKey: () => null, getApiKeyMetadata: () => ({ configured: false }) }, config: { apiKey: 'GLOBAL_MUST_NOT_USE' }, spawnImpl: () => { launched = true; throw new Error('should not launch'); } });
   assert.equal(runtime.providerConfigured('u'), false);
   assert.equal(runtime.providerConfigured(), false);
   await assert.rejects(runtime.start({ user: { id: 'u' } }), /个人设置/);
@@ -48,7 +48,7 @@ test('missing provider key fails before docker startup', async () => {
 
 test('pending asynchronous startup occupies the global slot and releases on failure', async () => {
   const runtime = createRuntime({
-    store: { getUser: () => ({ id: 'user', disabled: false }), getUserApiKey: () => 'not-a-real-personal-key' },
+    store: { runContext: { record() {}, engine() {}, replies() {} }, getUser: () => ({ id: 'user', disabled: false }), getUserApiKey: () => 'not-a-real-personal-key' },
     config: { dataDir: `/nonexistent-workspace-${Date.now()}`, maxConcurrentRuns: 1 },
   });
   const input = id => ({ run: { id, userId: 'user', threadId: `thread-${id}`, projectId: `project-${id}` }, thread: { id: `thread-${id}`, userId: 'user', projectId: `project-${id}` }, project: { id: `project-${id}`, userId: 'user' }, user: { id: 'user' }, text: 'hello' });

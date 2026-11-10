@@ -81,7 +81,7 @@ const activitySource: Record<RunEvent['source'], string> = { cloud: '云端容�
 const activityKind: Record<RunEvent['kind'], string> = {
   task: '任务', command: '终端命令', file: '文件操作', tool: '工具', approval: '授权', verification: '验收命令',
 };
-const toolNames: Record<string, string> = { search: '联网搜索', image: '生成图片', analyze: '分析文件' };
+const toolNames: Record<string, string> = { search: '联网搜索', image: '生成图片', analyze: '分析文件', ultra: 'Ultra 多代理' };
 const eventTime = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 function activityTime(value: string) {
@@ -94,8 +94,8 @@ function activityKey(event: RunEvent) {
   return `${event.source}:${event.kind}:${event.tool ?? ''}:${event.itemId ?? ''}`;
 }
 
-export function TaskActivity({ run, events, error, refresh }: {
-  run: Run; events: RunEvent[]; error?: string; refresh: () => void;
+export function TaskActivity({ run, events, error, refresh, initiallyOpen = false }: {
+  run: Run; events: RunEvent[]; error?: string; refresh: () => void; initiallyOpen?: boolean;
 }) {
   const logs = run.logs ?? [];
   if (!run.mode && !events.length && !logs.length) return null;
@@ -106,7 +106,7 @@ export function TaskActivity({ run, events, error, refresh }: {
       if (key && event.status !== 'started' && event.status !== 'awaiting_approval') recordedOutcomes.set(key, event.seq);
     }
   }
-  return <details className="tool-activity" open={run.status === 'running'}>
+  return <details className="tool-activity" open={run.status === 'running' || initiallyOpen}>
     <summary><Icon name="terminal" size={15} /><span>执行活动</span><small>{events.length || logs.length} 条</small><Icon name="down" size={14} /></summary>
     {error && <div className="run-activity-note" role="alert"><span>{error}</span><button type="button" className="text-button" onClick={refresh}>重试</button></div>}
     {events.length > 0 && <ol className="run-event-list" aria-label="执行活动，最新在前">

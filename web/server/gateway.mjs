@@ -202,11 +202,13 @@ function providerRequestId(response) {
   return /^req_[a-f0-9]{16,64}$/i.test(id ?? '') ? id : undefined;
 }
 
-function providerFailure(details, status, requestId, stage) {
+function providerFailure(details, status, requestId, stage, chatMode) {
   const code = [details?.code, details?.type].find(value => PROVIDER_MESSAGES.has(value));
   const diagnostic = { category: 'provider', providerStatus: status, providerCode: code, providerRequestId: requestId };
   const message = PROVIDER_MESSAGES.get(code)
     ?? (status === 401 ? PROVIDER_MESSAGES.get('invalid_api_key')
+      : chatMode === 'ultra' && (status === undefined || [400, 403, 422].includes(status))
+        ? 'OpenAI 未接受本次 Ultra 请求，请检查 API 项目的多代理权限，或切换到 Max 重试。'
       : status === 403 ? 'OpenAI 拒绝了本次请求，请检查 API 项目权限或组织验证状态。'
       : status === 429 ? 'OpenAI API 额度或调用频率受限，请检查账单或稍后重试。'
       : status >= 500 ? 'OpenAI 服务暂时异常，请稍后重试。'
@@ -248,15 +250,16 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
   const activeRequests = new Set();
   let server, listening;
 
-  function authorizeRun({ id, userId, chatTools, chatFiles = [], chatModel, reasoningEffort }) {
+  function authorizeRun({ id, userId, chatTools, chatFiles = [], chatModel, reasoningEffort, chatMode }) {
     if (chatTools !== undefined && (!Array.isArray(chatTools) || chatTools.some(type => !CHAT_TOOLS.has(type)))) {
       throw new GatewayError('无效的聊天工具权限。');
     }
     const files = validateChatFiles(chatFiles);
     if (files.length && !chatTools?.includes('code_interpreter')) throw new GatewayError('未启用文件分析工具。');
-    if (!chatTools && (chatModel !== undefined || reasoningEffort !== undefined)) throw new GatewayError('该聊天配置不可用于项目任务。');
+    if (!chatTools && (chatModel !== undefined || reasoningEffort !== undefined || chatMode !== undefined)) throw new GatewayError('该聊天配置不可用于项目任务。');
+    if (chatMode === 'ultra' && chatTools.length) throw new GatewayError('Ultra 当前仅支持普通文字聊天。');
     const selection = chatTools
-      ? resolveChatSelection(store.getChatModelCatalog(config.model), chatModel, reasoningEffort)
+      ? resolveChatSelection(store.getChatModelCatalog(config.model), chatModel, reasoningEffort, chatMode)
       : { model: config.model };
     const token = randomBytes(32).toString('base64url');
     capabilities.set(token, { runId: id, userId, ...selection, chatTools: chatTools && new Set(chatTools), chatFiles: files, expires: Date.now() + (config.runTimeoutMs || 20 * 60_000) + 60_000, inFlight: false, requestCount: 0, controllers: new Set(), tasks: new Set() });
@@ -327,6 +330,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       }
       const user = store.getUser(cap.userId);
       if (!user || user.disabled) throw new GatewayError('账号已停用。', 403);
+      if (store.work?.getRunBinding(cap.userId, cap.runId)) store.work.assertRunCurrent(cap.userId, cap.runId);
       if (req.method !== 'POST' || req.url !== '/v1/responses') throw new GatewayError('不支持的模型接口。', 404);
       if (req.headers.origin) throw new GatewayError('模型网关不接受浏览器请求。', 403);
       if (cap.inFlight) throw new GatewayError('同一任务已有模型请求在运行。', 429);
@@ -339,6 +343,13 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
         if (cap.reasoningEffort !== undefined) payload.reasoning = { effort: cap.reasoningEffort };
         payload.safety_identifier = createHash('sha256').update(`kivo-user:${cap.userId}`).digest('hex');
       }
+      if (cap.chatMode === 'ultra') {
+        if (Array.isArray(payload.input) && payload.input.some(item => typeof item.content !== 'string')) {
+          throw new GatewayError('Ultra 当前仅支持普通文字聊天。');
+        }
+        payload.multi_agent = { enabled: true, max_concurrent_subagents: 3 };
+        payload.instructions = [payload.instructions, 'Delegate independent subtasks when it improves quality. The root agent verifies and synthesizes the final answer.'].filter(Boolean).join('\n\n');
+      }
       // Resolve credentials only from the capability-bound user. The runner
       // receives this capability, never a real key or a global fallback key.
       const currentUser = store.getUser(cap.userId);
@@ -346,12 +357,14 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       const apiKey = store.getUserApiKey(cap.userId);
       if (!apiKey) throw new GatewayError('请先在个人设置中填写你的 OpenAI API 密钥。', 409);
       if (!capabilities.has(rawToken)) throw new GatewayError('任务已取消。', 409);
+      if (store.work?.getRunBinding(cap.userId, cap.runId)) store.work.assertRunCurrent(cap.userId, cap.runId);
       controller = new AbortController(); cap.controllers.add(controller);
       const timeout = setTimeout(() => controller.abort(new DOMException('OpenAI request timed out', 'TimeoutError')), config.upstreamTimeoutMs || 180_000); timeout.unref();
       controller.signal.addEventListener('abort', () => clearTimeout(timeout), { once: true });
       try {
         authorization = `Bearer ${apiKey}`;
         const headers = { authorization, 'content-type': 'application/json' };
+        if (cap.chatMode === 'ultra') headers['OpenAI-Beta'] = 'responses_multi_agent=v1';
         if (cap.chatFiles.length) {
           const interpreter = payload.tools.find(tool => tool.type === 'code_interpreter');
           if (!interpreter) throw new GatewayError('分析附件需要启用文件分析工具。');
@@ -375,7 +388,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
         if (!upstream.ok) {
           if (upstream.status >= 400 && upstream.status < 500) settle({ inputTokens: null, outputTokens: null, totalTokens: null }, 'failed');
           const details = await smallJson(upstream);
-          throw providerFailure(details?.error, upstream.status, requestId, stage);
+          throw providerFailure(details?.error, upstream.status, requestId, stage, cap.chatMode);
         }
         if (!upstream.headers.get('content-type')?.includes('text/event-stream') || !upstream.body) {
           await upstream.body?.cancel().catch(() => {});
@@ -397,7 +410,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
           // Provider error bodies can contain credential fragments or internal
           // details. Preserve protocol shape while forwarding only safe text.
           if (event.type === 'error' || event.type === 'response.failed' || event.error || event.response?.error) {
-            const error = providerFailure(event.response?.error ?? event.error ?? event, undefined, requestId, stage);
+            const error = providerFailure(event.response?.error ?? event.error ?? event, undefined, requestId, stage, cap.chatMode);
             const safeError = { code: 'workspace_upstream_error', message: error.message };
             reportFailure(error.diagnostic);
             if (event.type === 'error') {
