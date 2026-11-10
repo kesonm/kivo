@@ -180,6 +180,28 @@ test('administrators configure chat models and the server enforces their enabled
   assert.equal((await member.request('POST', `/api/threads/${project.thread.id}/turns`, { text: 'test', reasoningEffort: 'high' })).status, 400);
 });
 
+test('Ultra is opt-in and rejects unsupported models, tools and project turns before starting a run', async t => {
+  const { client, store, startCalls } = await fixture(t);
+  const member = await client();
+  await register(member, 'ultra_tester');
+  await member.request('PUT', '/api/account/api-key', { apiKey: keyA });
+  const session = (await member.request('GET', '/api/session')).data;
+  assert.deepEqual(session.chatModels.filter(model => model.supportsUltra).map(model => model.id), ['gpt-6.1-sol']);
+  const thread = (await member.request('POST', '/api/threads', {})).data.thread;
+  const project = await projectThread(member);
+  const turn = `/api/threads/${thread.id}/turns`;
+  const base = { text: 'Compare two designs', model: 'gpt-6.1-sol', mode: 'ultra' };
+  for (const payload of [{ ...base, model: 'gpt-6-luna' }, { ...base, tool: 'search' }, { ...base, mode: 'unknown' }]) {
+    assert.equal((await member.request('POST', turn, payload)).data.code, 'chat_mode_invalid');
+  }
+  assert.equal((await member.request('POST', `/api/threads/${project.thread.id}/turns`, { text: base.text, mode: 'ultra' })).data.code, 'chat_mode_invalid');
+  assert.equal(store.getMessages(thread.id).length, 0);
+  assert.equal(startCalls.length, 0);
+  assert.equal((await member.request('POST', turn, { ...base, tool: 'auto' })).status, 202);
+  assert.equal(startCalls[0].chatMode, 'ultra');
+  assert.equal(startCalls[0].reasoningEffort, 'max');
+});
+
 test('admin discovery lists provider models without publishing them until explicitly saved', async t => {
   const chatIds = ['chat-latest', 'gpt-5.4', 'gpt-5.5', 'gpt-5.6-sol',
     ...Array.from({ length: 28 }, (_, i) => `gpt-4o-2026-01-${String(i + 1).padStart(2, '0')}`)];

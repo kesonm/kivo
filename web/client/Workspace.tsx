@@ -39,6 +39,7 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const [verificationCommand, setVerificationCommand] = useState('');
   const [selectedTool, setSelectedTool] = useState<Exclude<ChatTool, 'analyze'>>('auto');
   const [selectedModel, setSelectedModel] = useState<string>();
+  const [ultraSelected, setUltraSelected] = useState(false);
   const [modelEfforts, setModelEfforts] = useState<Partial<Record<string, ReasoningEffort>>>({});
   const [attachments, setAttachments] = useState<File[]>([]);
   const [error, setError] = useState('');
@@ -69,7 +70,11 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
     ?? modelOptions.find(option => option.id === (defaultChatModel ?? model)) ?? modelOptions[0];
   const savedEffort = chatModel && modelEfforts[chatModel.id];
   const reasoningEffort = savedEffort && chatModel?.efforts?.includes(savedEffort) ? savedEffort : chatModel?.defaultEffort ?? undefined;
+  const ultraAvailable = !!chatModel?.supportsUltra && chatTool === 'auto';
+  const ultra = ultraSelected && ultraAvailable;
+  useEffect(() => { if (!ultraAvailable) setUltraSelected(false); }, [ultraAvailable]);
   function selectEffort(effort?: ReasoningEffort) {
+    setUltraSelected(false);
     if (chatModel) setModelEfforts(previous => ({ ...previous, [chatModel.id]: effort }));
   }
   useEffect(() => {
@@ -94,6 +99,7 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       setVerificationCommand('');
       setAttachments([]);
       setSelectedTool('auto');
+      setUltraSelected(false);
     }
     newlyCreatedThread.current = null; setRun(null); setMessages([]); setTitle('新的对话');
     if (threadId) void loadThread(threadId, true);
@@ -160,6 +166,7 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
     }
     setAttachments(next);
     setSelectedTool('auto');
+    setUltraSelected(false);
     textarea.current?.focus();
   }
 
@@ -181,9 +188,9 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
         onThreadCreated(created.thread);
       }
       const check = cloudProject ? verificationCommand.trim() : '';
-      let body: { text: string; tool?: ChatTool; model?: string; reasoningEffort?: ReasoningEffort; verificationCommand?: string } | FormData = project
+      let body: { text: string; tool?: ChatTool; model?: string; mode?: 'ultra'; reasoningEffort?: ReasoningEffort; verificationCommand?: string } | FormData = project
         ? { text, ...(check ? { verificationCommand: check } : {}) }
-        : { text, tool: chatTool, model: chatModel?.id, reasoningEffort };
+        : { text, tool: chatTool, model: chatModel?.id, ...(ultra ? { mode: 'ultra' } : { reasoningEffort }) };
       if (hasFiles) {
         const form = new FormData();
         form.set('text', text);
@@ -198,11 +205,13 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       if (!mounted.current || threadRef.current !== id) return;
       setInput(''); setVerificationOpen(false); setVerificationCommand('');
       setAttachments([]); setSelectedTool('auto'); setRun(result.run);
+      setUltraSelected(false);
       await loadThread(id); void refreshSession().catch(() => undefined);
     } catch (e) {
       if (mounted.current) {
         setError(messageOf(e));
-        if (!project && e instanceof ApiError && (e.code === 'chat_model_invalid' || e.code === 'chat_reasoning_invalid')) {
+        if (!project && e instanceof ApiError && (e.code === 'chat_model_invalid' || e.code === 'chat_reasoning_invalid' || e.code === 'chat_mode_invalid')) {
+          setUltraSelected(false);
           void refreshSession().catch(() => undefined);
         }
       } else onThreadsChanged();
@@ -287,7 +296,8 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       </div>
     </form> : <ChatComposer draft={input} setDraft={setInput} textarea={textarea} attachments={attachments} onAttach={attachFiles}
       onRemove={index => setAttachments(files => files.filter((_, i) => i !== index))} tool={chatTool} onTool={setSelectedTool}
-      model={chatModel} models={modelOptions} onModel={setSelectedModel} effort={reasoningEffort} onEffort={selectEffort}
+      model={chatModel} models={modelOptions} onModel={id => { setSelectedModel(id); setUltraSelected(false); }}
+      effort={ultra ? 'max' : reasoningEffort} onEffort={selectEffort} ultra={ultra} ultraAvailable={ultraAvailable} onUltra={setUltraSelected}
       onOpenReasoning={() => void refreshSession().catch(() => undefined)} threadId={threadId} providerConfigured={providerConfigured}
       busy={composerBusy} running={running} sending={sending} stopping={stopping} onSend={send} onStop={() => void interrupt()} onOpenLocal={onOpenLocal} />}
     <div className="composer-footer">{project && <button type="button" className="composer-project" onClick={() => void changePanel(true)} title="查看项目文件"><Icon name="folder" size={13} /><span>{project.name}{project.location === 'local' ? ' · 本地电脑' : ' · 云端'}</span></button>}

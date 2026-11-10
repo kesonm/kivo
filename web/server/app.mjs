@@ -134,7 +134,7 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
   function idle(projectId){if(store.getActiveRunForProject(projectId))throw new AppError('项目任务正在执行，请等待完成或停止任务后操作文件',409);}
   const fileAction=fn=>async(req,res)=>{const p=ownedProject(req);await projects.withLock(p.id,async()=>{idle(p.id);res.json(await fn(p,req));});};
 
-  async function startOwnedRun({ thread, project, userId, text, executionText = text, verificationCommand, resumedFromRunId, requestMessageId, tool, model, reasoningEffort, files = [], attachmentsOnly = false }) {
+  async function startOwnedRun({ thread, project, userId, text, executionText = text, verificationCommand, resumedFromRunId, requestMessageId, tool, model, reasoningEffort, chatMode, files = [], attachmentsOnly = false }) {
     if (project) idle(project.id);
     if (!attachmentsOnly && !runtime.providerConfigured(userId)) throw new AppError('请先在个人设置中填写你的 OpenAI API 密钥', 409, 'api_key_required');
     const user = store.getUser(userId);
@@ -149,14 +149,14 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
       message = store.appendMessage(thread.id, 'user', text, { uploads: files });
       store.updateRun(run.id, { requestMessageId: requestMessageId ?? message.id });
       store.appendRunEvent(run.id, { kind: 'task', source, status: 'started',
-        summary: resumedFromRunId ? '从当前工作区继续' : undefined }, 'task:start');
+        summary: chatMode === 'ultra' ? 'Ultra 多代理' : resumedFromRunId ? '从当前工作区继续' : undefined }, 'task:start');
       if (attachmentsOnly) {
         const output = '附件已保存，可以点击文件名下载。当前无法读取这些文件的内容。';
         store.appendMessage(thread.id, 'assistant', output);
         store.appendRunEvent(run.id, { kind: 'task', source, status: 'succeeded', summary: '已保存附件' }, 'task:end',
           { runPatch: { status: 'completed', output } });
       } else {
-        await runtime.start({ run, thread, project, user, text: executionText, tool, model, reasoningEffort, files });
+        await runtime.start({ run, thread, project, user, text: executionText, tool, model, reasoningEffort, chatMode, files });
       }
     } catch (error) {
       if (message && !resumedFromRunId) store.deleteMessage(message.id);
@@ -335,11 +335,15 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     const body=multipart?await readChatMultipart(req.body,req.get('content-type')):req.body;
     const files=multipart?body.files:[];
     const tool=body.tool??(files.length?'analyze':undefined);
+    if (thread.projectId!==null && body.mode!==undefined) throw new AppError('聊天模式仅适用于普通对话',400,'chat_mode_invalid');
+    if (body.mode==='ultra' && (multipart || (tool!==undefined && tool!=='auto'))) {
+      throw new AppError('Ultra 当前仅支持普通文字聊天，请移除附件或切换到普通思考档位',400,'chat_mode_invalid');
+    }
     if(thread.projectId!==null&&(body.model!==undefined||body.reasoningEffort!==undefined)) {
       throw new AppError('项目任务由执行器选择模型和思考档位',400,'chat_model_invalid');
     }
     const selection=thread.projectId===null
-      ?resolveChatSelection(store.getChatModelCatalog(config.model),body.model,body.reasoningEffort):{};
+      ?resolveChatSelection(store.getChatModelCatalog(config.model),body.model,body.reasoningEffort,body.mode):{};
     if(tool!==undefined&&(!chatTools.has(tool)||project))throw new AppError('无效的聊天工具',400);
     if(tool==='analyze'&&!files.length)throw new AppError('请先添加要分析的附件',400);
     const noPrompt=body.text===undefined||(typeof body.text==='string'&&!body.text.trim());

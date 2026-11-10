@@ -25,6 +25,9 @@ type ComposerProps = {
   onModel: (model: string) => void;
   effort?: ReasoningEffort;
   onEffort: (effort?: ReasoningEffort) => void;
+  ultra: boolean;
+  ultraAvailable: boolean;
+  onUltra: (enabled: boolean) => void;
   onOpenReasoning: () => void;
   threadId: string | null;
   providerConfigured: boolean;
@@ -37,7 +40,7 @@ type ComposerProps = {
   onOpenLocal: () => void;
 };
 
-export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach, onRemove, tool, onTool, model, models, onModel, effort, onEffort, onOpenReasoning, threadId, providerConfigured, busy, running, sending, stopping, onSend, onStop, onOpenLocal }: ComposerProps) {
+export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach, onRemove, tool, onTool, model, models, onModel, effort, onEffort, ultra, ultraAvailable, onUltra, onOpenReasoning, threadId, providerConfigured, busy, running, sending, stopping, onSend, onStop, onOpenLocal }: ComposerProps) {
   const [menu, setMenu] = useState<'tools' | 'reasoning' | 'models' | null>(null);
   const [opensBelow, setOpensBelow] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
@@ -54,6 +57,7 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
   const efforts = model?.efforts ?? [];
   const effortIndex = Math.max(0, effort ? efforts.indexOf(effort) : 0);
   const effortLabel = efforts.length ? effortLabels[efforts[effortIndex]] : '由模型决定';
+  const modeLabel = ultra ? 'Ultra 多代理' : effortLabel;
   const modelMenuOpen = (menu === 'reasoning' || menu === 'models') && !blocked;
   const nativeVoiceBlocked = typeof navigator !== 'undefined' && /\bkivo-iOS\//i.test(navigator.userAgent);
   const updateVoiceBusy = useCallback((value: boolean) => {
@@ -173,9 +177,9 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
           }
         }} />
       <div className="composer-controls">
-        <button ref={modelTrigger} type="button" className="composer-model-picker" title={`${modelLabel} · 思考程度 ${effortLabel}`} aria-label={`选择思考程度，当前模型 ${modelLabel}，${effortLabel}`} aria-haspopup="dialog"
+        <button ref={modelTrigger} type="button" className={'composer-model-picker' + (ultra ? ' ultra-active' : '')} title={`${modelLabel} · ${modeLabel}`} aria-label={`选择思考程度，当前模型 ${modelLabel}，${modeLabel}`} aria-haspopup="dialog"
           aria-expanded={modelMenuOpen} aria-controls={modelMenuOpen ? menuId : undefined} disabled={blocked || !models.length} onClick={() => toggleMenu('reasoning')}>
-          <span>{modelLabel}</span><Icon name="down" size={13} />
+          <span>{ultra ? 'Ultra' : modelLabel}</span><Icon name="down" size={13} />
         </button>
         <VoiceControls disabled={busy || !providerConfigured || nativeVoiceBlocked} disabledReason={nativeVoiceBlocked ? '请在浏览器中使用语音功能' : undefined}
           hasDraft={hasDraft || running} threadId={threadId} onDictation={insertDictation} onBusyChange={updateVoiceBusy} />
@@ -214,7 +218,7 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
             </button>
           </div>
           <button type="button" className="reasoning-reset" title="恢复默认思考档位" aria-label="恢复默认思考档位"
-            disabled={efforts.length < 2 || effort === model?.defaultEffort} onClick={() => {
+            disabled={!ultra && (efforts.length < 2 || effort === model?.defaultEffort)} onClick={() => {
               onEffort();
               menuContent.current?.querySelector('input')?.focus();
             }}>
@@ -229,6 +233,13 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
             value={effortIndex} disabled={efforts.length < 2} onChange={event => onEffort(efforts[Number(event.currentTarget.value)])} />
         </div>}
         {!efforts.length && <p className="reasoning-unavailable">此模型未配置思考档位</p>}
+        {model?.supportsUltra && <div className="reasoning-ultra">
+          <button type="button" role="switch" aria-checked={ultra} aria-describedby={`${menuId}-ultra-hint`}
+            className="reasoning-ultra-switch" disabled={!ultraAvailable} onClick={() => onUltra(!ultra)}>
+            <span>Ultra · 多代理</span><span className="reasoning-ultra-toggle" aria-hidden="true" />
+          </button>
+          <p id={`${menuId}-ultra-hint`}>{ultraAvailable ? '仅本条消息，可并行处理任务，可能消耗更多 token。' : 'Ultra 仅用于普通文字聊天。'}</p>
+        </div>}
       </> : <>
         <button type="button" role="menuitem" className="reasoning-back" onClick={() => setMenu('reasoning')}>
           <Icon name="chevron" size={13} />返回思考程度

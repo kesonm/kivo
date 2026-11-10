@@ -81,7 +81,7 @@ const activitySource: Record<RunEvent['source'], string> = { cloud: '云端容�
 const activityKind: Record<RunEvent['kind'], string> = {
   task: '任务', command: '终端命令', file: '文件操作', tool: '工具', approval: '授权', verification: '验收命令',
 };
-const toolNames: Record<string, string> = { search: '联网搜索', image: '生成图片', analyze: '分析文件' };
+const toolNames: Record<string, string> = { search: '联网搜索', image: '生成图片', analyze: '分析文件', ultra: 'Ultra 多代理' };
 const eventTime = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 function activityTime(value: string) {

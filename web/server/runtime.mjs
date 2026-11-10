@@ -349,7 +349,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
 
   async function executeChat(state, payload, port) {
     try {
-      await streamChat({ port, token: state.token, payload, signal: state.chatController.signal,
+      await streamChat({ port, token: state.token, payload, signal: state.chatController.signal, chatMode: state.chatMode,
         onText: (text, itemId) => appendText(state, text, itemId),
         onImage: artifact => state.artifacts.push(artifact),
         onCitation: citation => state.citations.push(citation),
@@ -427,7 +427,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       }
       throw new GatewayError('无法确认上一次任务已安全退出，请稍后重试。', 409);
     },
-    async start({ run, thread, project, user, text, tool, model, reasoningEffort, files = [] }) {
+    async start({ run, thread, project, user, text, tool, model, reasoningEffort, chatMode, files = [] }) {
       assertCapacity();
       const account = user?.id && store.getUser(user.id);
       if (!account || account.disabled) throw new GatewayError('账号已停用。', 403);
@@ -468,13 +468,16 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
         // Validate the full persisted history before acquiring a provider token.
         // This branch never touches project directories or starts Docker.
         const messages = store.getMessagesForContext(thread.id, { maxMessages: CHAT_MAX_MESSAGES, maxBytes: CHAT_MAX_BYTES });
-        const payload = prepareChatRequest(messages, text, config, { tool, files });
+        if (chatMode === 'ultra' && (files.length || (tool !== undefined && tool !== 'auto'))) {
+          throw new GatewayError('Ultra 当前仅支持普通文字聊天。');
+        }
+        const payload = prepareChatRequest(messages, text, config, { tool: chatMode === 'ultra' ? undefined : tool, files });
         if (!gatewayReady) gatewayReady = gateway.start();
         const address = await gatewayReady;
         checkAccount();
-        const state = { kind: 'chat', run, thread, project: null, user, token: '', output: '', logs: [], artifacts: [], citations: [], pendingImageActivity: [], pending: new Map(), finishing: null, chatController: new AbortController() };
+        const state = { kind: 'chat', chatMode, run, thread, project: null, user, token: '', output: '', logs: [], artifacts: [], citations: [], pendingImageActivity: [], pending: new Map(), finishing: null, chatController: new AbortController() };
         state.token = gateway.authorizeRun({ id: run.id, userId: user.id,
-          chatModel: model, reasoningEffort, chatTools: payload.tools.map(tool => tool.type),
+          chatModel: model, reasoningEffort, chatMode, chatTools: payload.tools.map(tool => tool.type),
           chatFiles: files.filter(file => file.kind === 'table').map(file => ({ ...file, name: file.analysisName ?? file.name })) });
         active.set(run.id, state);
         startingProjects.delete(operationKey); startingUsers.delete(user.id);

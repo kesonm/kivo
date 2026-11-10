@@ -8,6 +8,9 @@ import { prepareChatRequest, CHAT_MAX_MESSAGES, CHAT_MAX_BYTES } from '../server
 const encode = event => new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
 const usage = { input_tokens: 10, output_tokens: 5, total_tokens: 15 };
 const terminal = (text, type = 'response.completed') => ({ type, response: { output: [{ type: 'message', role: 'assistant', id: 'answer', content: [{ type: 'output_text', text }] }], usage } });
+const agentMessage = (id, agent, text, phase = 'final_answer') => ({
+  type: 'message', id, role: 'assistant', agent: { agent_name: agent }, phase, content: [{ type: 'output_text', text }],
+});
 async function until(predicate) {
   const deadline = Date.now() + 5000;
   while (!predicate()) { if (Date.now() > deadline) throw new Error('Timed out waiting for runtime state'); await new Promise(resolve => setTimeout(resolve, 5)); }
@@ -22,7 +25,8 @@ function setup(t, { fetchImpl, config: overrides = {} } = {}) {
   });
   const calls = [];
   const controlledFetch = async (url, options) => {
-    const call = { url, payload: JSON.parse(options.body), authorization: options.headers.authorization, controller: null };
+    const call = { url, payload: JSON.parse(options.body), authorization: options.headers.authorization,
+      beta: options.headers['OpenAI-Beta'], controller: null };
     calls.push(call);
     return new Response(new ReadableStream({ start(controller) {
       call.controller = controller;
@@ -57,6 +61,89 @@ test('plain chat cancellation settles unknown usage once and retains streamed te
   const records = f.store.getUsage({ userId: input.user.id }).usage;
   assert.equal(records.length, 1); assert.equal(records[0].status, 'unknown'); assert.equal(records[0].totalTokens, null);
   assert.equal(f.store.db.prepare('SELECT count(*) n FROM projects').get().n, 0);
+});
+
+test('Ultra delegates upstream and publishes only the root final answer, settling usage once', { timeout: 10000 }, async t => {
+  const f = setup(t, { config: { model: 'gpt-6.1-sol' } }), input = f.create();
+  await f.runtime.start({ ...input, tool: 'auto', chatMode: 'ultra' });
+  await until(() => f.calls[0]?.controller);
+  const call = f.calls[0];
+  assert.equal(call.beta, 'responses_multi_agent=v1');
+  assert.equal(call.authorization, 'Bearer sk-fake-chat-runtime-alpha-0123456789');
+  assert.deepEqual(call.payload.multi_agent, { enabled: true, max_concurrent_subagents: 3 });
+  assert.deepEqual(call.payload.reasoning, { effort: 'max' });
+  assert.deepEqual(call.payload.tools, []);
+  assert.equal(call.payload.store, false);
+  const spawn = { type: 'multi_agent_call', action: 'spawn_agent', call_id: 'spawn-1', arguments: 'private task prompt' };
+  const spawnResult = { type: 'multi_agent_call_output', call_id: 'spawn-1',
+    output: [{ type: 'output_text', text: JSON.stringify({ task_name: '/root/child' }) }] };
+  const child = agentMessage('child', '/root/child', 'private child text');
+  const commentary = agentMessage('commentary', '/root', 'private commentary', 'commentary');
+  const answer = agentMessage('answer', '/root', '最终答复。');
+  const push = event => call.controller.enqueue(encode(event));
+  push({ type: 'response.output_item.added', item: spawn, output_index: 0 });
+  push({ type: 'response.output_item.done', item: spawnResult, output_index: 1 });
+  push({ type: 'response.output_item.added', item: child, output_index: 2 });
+  push({ type: 'response.output_item.added', item: commentary, output_index: 3 });
+  push({ type: 'response.output_text.delta', item_id: 'child', delta: 'private child text' });
+  push({ type: 'response.output_text.delta', item_id: 'commentary', delta: 'private commentary' });
+  push({ type: 'response.output_item.added', item: { ...answer, content: [] }, output_index: 4 });
+  push({ type: 'response.output_text.delta', output_index: 4, delta: '最终' });
+  await until(() => f.store.getRun(input.run.id).output === '最终');
+  const completed = { type: 'response.completed', response: { output: [spawn, spawnResult, child, commentary, answer], usage } };
+  push({ type: 'response.output_item.done', item: answer, output_index: 4 });
+  push(completed);
+  call.controller.close();
+  await until(() => f.store.getRun(input.run.id).status !== 'running');
+  assert.equal(f.store.getRun(input.run.id).status, 'completed');
+  assert.deepEqual(f.store.getMessages(input.thread.id).map(message => message.content), [input.text, '最终答复。']);
+  const events = f.store.getRunEvents(input.run.id, { after: 0, limit: 100 });
+  assert.ok(events.some(event => event.tool === 'ultra' && event.summary === '已分派子代理'));
+  assert.ok(events.some(event => event.tool === 'ultra' && event.summary === '主代理正在汇总结果'));
+  assert.ok(!JSON.stringify(events).includes('private'));
+  const records = f.store.getUsage({ userId: input.user.id }).usage;
+  assert.deepEqual(records.map(record => [record.status, record.totalTokens]), [['completed', 15]]);
+
+  const next = f.create(input.user, '普通 Max');
+  await f.runtime.start({ ...next, tool: 'auto', reasoningEffort: 'max' });
+  await until(() => f.calls[1]?.controller);
+  assert.equal(f.calls[1].beta, undefined);
+  assert.equal(f.calls[1].payload.multi_agent, undefined);
+  assert.deepEqual(f.calls[1].payload.reasoning, { effort: 'max' });
+  assert.ok(f.calls[1].payload.tools.some(tool => tool.type === 'web_search'));
+  f.calls[1].controller.enqueue(encode(terminal('普通答复')));
+  f.calls[1].controller.close();
+  await until(() => f.store.getRun(next.run.id).status === 'completed');
+});
+
+test('stopping Ultra keeps the visible root answer and leaves missing usage unknown', { timeout: 10000 }, async t => {
+  const f = setup(t, { config: { model: 'gpt-6.1-sol' } }), input = f.create();
+  await f.runtime.start({ ...input, chatMode: 'ultra' });
+  await until(() => f.calls[0]?.controller);
+  const { controller } = f.calls[0];
+  controller.enqueue(encode({ type: 'response.output_item.added', item: agentMessage('answer', '/root', ''), output_index: 0 }));
+  controller.enqueue(encode({ type: 'response.output_text.delta', item_id: 'answer', delta: '已收到的答案' }));
+  await until(() => f.store.getRun(input.run.id).output === '已收到的答案');
+  await f.runtime.interrupt(input.run.id);
+  assert.equal(f.store.getRun(input.run.id).status, 'interrupted');
+  assert.equal(f.store.getMessages(input.thread.id).find(message => message.role === 'assistant').content, '已收到的答案');
+  assert.deepEqual(f.store.getUsage({ userId: input.user.id }).usage.map(record => [record.status, record.totalTokens]), [['unknown', null]]);
+});
+
+test('a rejected Ultra request keeps the question and does not silently retry', { timeout: 10000 }, async t => {
+  let calls = 0;
+  const f = setup(t, { config: { model: 'gpt-6.1-sol' }, fetchImpl: async () => {
+    calls++;
+    return Response.json({ error: { message: 'PRIVATE_PROVIDER_RESPONSE' } }, { status: 403 });
+  } });
+  const input = f.create();
+  await f.runtime.start({ ...input, chatMode: 'ultra' });
+  await until(() => f.store.getRun(input.run.id).status === 'failed');
+  const run = f.store.getRun(input.run.id);
+  assert.match(run.error, /Ultra.*Max/);
+  assert.doesNotMatch(run.error, /PRIVATE_PROVIDER_RESPONSE/);
+  assert.equal(f.store.getMessages(input.thread.id).find(message => message.role === 'user').content, input.text);
+  assert.equal(calls, 1);
 });
 
 test('ordinary chats enforce user-one and global-two concurrency across chat and projects', { timeout: 10000 }, async t => {

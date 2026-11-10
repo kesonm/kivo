@@ -8,6 +8,7 @@ export type ChatTool = 'auto' | 'image' | 'search' | 'analyze';
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export interface ChatModelOption {
   id: string; label: string; description: string; efforts?: ReasoningEffort[]; defaultEffort?: ReasoningEffort | null;
+  supportsUltra?: boolean;
 }
 export interface AdminChatModel extends ChatModelOption {
   efforts: ReasoningEffort[]; defaultEffort: ReasoningEffort | null; enabled: boolean;
