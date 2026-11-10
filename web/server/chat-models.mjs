@@ -5,10 +5,9 @@ const builtins = [
   { id: 'gpt-6-luna', label: 'GPT-6 Luna', description: '适合快速处理简单任务', efforts: ['none', ...reasoningLevels] },
   { id: 'gpt-6-astra', label: 'GPT-6 Astra', description: '适合复杂推理和深入分析', efforts: reasoningLevels },
 ];
-const knownEfforts = new Map([
-  ...builtins.map(option => [option.id, option.efforts]),
-  ['gpt-6-sol', ['none', ...reasoningLevels]],
-]);
+const availableModels = [...builtins, { id: 'gpt-6-sol', label: 'GPT-6 Sol', description: '', efforts: ['none', ...reasoningLevels] }];
+const knownEfforts = new Map(availableModels.map(option => [option.id, option.efforts]));
+const maxModels = 24;
 const modelId = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/;
 
 class ChatModelError extends Error {
@@ -31,7 +30,7 @@ export function defaultChatModelCatalog(defaultModel) {
 }
 
 export function validateChatModelCatalog({ models, defaultModel }) {
-  if (!Array.isArray(models) || !models.length || models.length > 24) throw new ChatModelError('模型列表须有 1 至 24 个模型');
+  if (!Array.isArray(models) || !models.length || models.length > maxModels) throw new ChatModelError(`模型列表须有 1 至 ${maxModels} 个模型`);
   const ids = new Set();
   const validated = models.map(option => {
     const { id, label, description, enabled, efforts, defaultEffort } = option ?? {};
@@ -61,7 +60,11 @@ export function validateChatModelCatalog({ models, defaultModel }) {
 }
 
 export function adminChatModelCatalog(catalog) {
-  return { ...catalog, knownEfforts: Object.fromEntries(knownEfforts) };
+  const configuredIds = new Set(catalog.models.map(option => option.id));
+  // Make new options visible without changing the chat menu until an admin enables them.
+  const available = availableModels.filter(option => !configuredIds.has(option.id))
+    .slice(0, maxModels - catalog.models.length).map(option => ({ ...option, enabled: false, defaultEffort: 'medium' }));
+  return { ...catalog, models: [...catalog.models, ...available], knownEfforts: Object.fromEntries(knownEfforts) };
 }
 
 export function chatModelOptions(catalog) {

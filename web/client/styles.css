@@ -326,26 +326,20 @@ h1, h2, h3, p { margin-top: 0; }
 .composer-popover button.reasoning-back { min-height: 30px; font-size: 12px; color: var(--muted); }
 .reasoning-back .icon { transform: rotate(180deg); }
 .composer-popover-models button[aria-checked="true"] { background: #f3f3f3; }
-.admin-models { display: grid; gap: 16px; padding: 20px clamp(16px, 3vw, 28px) 24px; }
-.admin-model-row { display: grid; gap: 14px; min-width: 0; margin: 0; padding: 14px 16px 16px; border: 1px solid var(--line); border-radius: 12px; }
-.admin-model-id { max-width: 100%; padding: 0 6px; font-size: 13px; overflow-wrap: anywhere; }
-.admin-model-main, .admin-model-reasoning { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(180px, 1.4fr); gap: 12px; }
-.admin-model-main > label, .admin-effort-default, .admin-model-add > label { display: grid; gap: 5px; min-width: 0; font-size: 12px; color: var(--muted); }
-.admin-model-main input, .admin-model-add input, .admin-effort-default select { width: 100%; min-height: 36px; padding: 7px 9px; }
-.admin-model-reasoning { grid-template-columns: minmax(0, 1fr) minmax(110px, 160px); align-items: end; }
-.admin-effort-options, .admin-model-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; font-size: 12px; }
-.admin-effort-options > span { color: var(--muted); }
-.admin-effort-options label, .admin-model-actions label { display: inline-flex; align-items: center; gap: 5px; }
-.admin-models input[type="checkbox"], .admin-models input[type="radio"] { margin: 0; accent-color: var(--ink); }
-.admin-model-actions { padding-top: 10px; border-top: 1px solid #efefef; }
-.admin-model-add, .admin-model-save { display: flex; align-items: end; flex-wrap: wrap; gap: 8px; }
-.admin-model-add > label { flex: 0 1 330px; }
-.admin-model-save { justify-content: flex-end; }
-@media (max-width: 600px) {
-  .admin-model-main, .admin-model-reasoning { grid-template-columns: minmax(0, 1fr); }
-  .admin-model-add > label { flex-basis: 100%; }
-  .admin-model-main input, .admin-model-add input { font-size: 16px; }
-}
+.admin-models { display: grid; gap: 14px; padding: 4px clamp(16px, 3vw, 28px) 24px; }
+.admin-model-list { margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: 12px; }
+.admin-model-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 12px; }
+.admin-model-row + .admin-model-row { border-top: 1px solid var(--line); }
+.admin-model-label { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; min-height: 40px; padding: 5px 0; cursor: pointer; }
+.admin-model-label input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--ink); }
+.admin-model-label input:focus-visible { outline: 2px solid #757575; outline-offset: 3px; }
+.admin-model-name { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 10px; min-width: 0; overflow-wrap: anywhere; }
+.admin-model-name strong { font-size: 14px; font-weight: 550; }
+.admin-model-name code { font-size: 12px; color: var(--muted); }
+.admin-model-default { padding: 2px 7px; border-radius: 6px; font-size: 11px; color: #4a4a4a; background: #f1f1f1; white-space: nowrap; }
+.admin-model-order { display: flex; flex: none; gap: 2px; }
+.admin-model-order .icon-button { min-width: 36px; min-height: 36px; }
+.admin-model-save { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 560px) {
   .composer.composer-chat { padding: 7px; }
   .composer-chat .composer-input-row, .composer-controls { gap: 3px; }
