@@ -12,6 +12,7 @@ import { createLocalBridge, localPath } from './local.mjs';
 import { createQrLogin } from './qr-login.mjs';
 import { attachmentDisposition, CHAT_UPLOAD_BODY_LIMIT, readChatMultipart } from './chat-files.mjs';
 import { adminChatModelCatalog, chatModelOptions, resolveChatSelection } from './chat-models.mjs';
+import { discoverOpenAiModels } from './model-discovery.mjs';
 import { createVoiceService } from './voice.mjs';
 
 const scrypt=promisify(scryptCallback);
@@ -67,7 +68,7 @@ export async function bootstrapAdmin(store,config){
   store.createUser({username:validUsername(config.adminUsername??'admin'),displayName:'管理员',passwordHash:await hashPassword(password),role:'admin'});
 }
 
-export function createApp({store,runtime,config,local=null,voice=createVoiceService({store}),projects:createProjectsOverride}){
+export function createApp({store,runtime,config,local=null,voice=createVoiceService({store}),projects:createProjectsOverride,modelListFetch}){
   const app=express();const projects=createProjectsOverride??createProjects(config);const limits=new Map();const loginFailures=new Map();
   let uploadsInProgress=0;
   const qrLogin=createQrLogin(store,config.publicOrigin||'https://kivo.iptnet.xyz');
@@ -417,6 +418,19 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
   app.get('/api/admin/models',admin,(req,res)=>{
     checkedQuery(req,[]);
     res.json(adminChatModelCatalog(store.getChatModelCatalog(config.model)));
+  });
+  app.get('/api/admin/models/available',admin,async(req,res)=>{
+    checkedQuery(req,[]);
+    rate(req,'admin-model-list',12,60_000);
+    const key=store.getUserApiKey(req.user.id);
+    if(!key)throw new AppError('请在账户设置中填写你的 OpenAI API Key，再刷新模型列表。',409,'api_key_required');
+    const signal=responseSignal(res);
+    try {
+      const available=await discoverOpenAiModels(key,{fetchImpl:modelListFetch,signal});
+      if(!signal.aborted)res.json(available);
+    } catch(error) {
+      if(!signal.aborted)throw error;
+    }
   });
   app.put('/api/admin/models',admin,(req,res)=>{
     rate(req,'admin-models',30,60_000);

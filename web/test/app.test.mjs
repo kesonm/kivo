@@ -8,14 +8,14 @@ import {once} from 'node:events';
 const password='Test-user-password-2026';
 const keyA='sk-project-test-only-aaaaaaaaaaaaaaaaaaaaaaaaAAAA';
 const keyB='sk-project-test-only-bbbbbbbbbbbbbbbbbbbbbbbbBBBB';
-async function fixture(t,{startError=false,trustProxy=false,forbidProjectCalls=false,startImplementation}={}) {
+async function fixture(t,{startError=false,trustProxy=false,forbidProjectCalls=false,startImplementation,modelListFetch}={}) {
   const store=createStore(':memory:',{credentialsKey:randomBytes(32)});
   const admin=store.createUser({username:'admin',displayName:'Admin',passwordHash:await hashPassword(password),role:'admin'});
   const startCalls=[],projectCalls=[];
   const runtime={providerConfigured:userId=>Boolean(userId&&store.getApiKeyMetadata(userId).configured),async start(args){startCalls.push(args);if(startError)throw Object.assign(new Error('Runner unavailable'),{status:503});if(startImplementation)await startImplementation(args);},async interrupt(id){store.updateRun(id,{status:'interrupted'});},async assertCloudRunStopped(){},subscribe:()=>()=>{},close(){}};
   const projectCall=name=>{projectCalls.push(name);if(forbidProjectCalls)throw new Error('Ordinary chat must not use project files');};
   const projects={async initialize(){projectCall('initialize');},async remove(){projectCall('remove');},async withLock(id,fn){projectCall('withLock');return fn();},async tree(){projectCall('tree');return {files:[]};},async readFile(id,p){projectCall('readFile');return {path:p,content:'test'};},async changedFiles(){projectCall('changedFiles');return [{path:'src/actual.js',status:'M'}];}};
-  const app=createApp({store,runtime,projects,config:{dataDir:'/tmp/cw-test',publicOrigin:'https://workspace.example',cookieSecure:false,model:'model',trustProxy}});
+  const app=createApp({store,runtime,projects,modelListFetch,config:{dataDir:'/tmp/cw-test',publicOrigin:'https://workspace.example',cookieSecure:false,model:'model',trustProxy}});
   const server=app.listen(0,'127.0.0.1');await once(server,'listening');
   t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));store.close();});
   const base=`http://127.0.0.1:${server.address().port}`;
@@ -178,6 +178,66 @@ test('administrators configure chat models and the server enforces their enabled
   assert.equal(startCalls[0].reasoningEffort, 'high');
   const project = await projectThread(member);
   assert.equal((await member.request('POST', `/api/threads/${project.thread.id}/turns`, { text: 'test', reasoningEffort: 'high' })).status, 400);
+});
+
+test('admin discovery lists provider models without publishing them until explicitly saved', async t => {
+  const chatIds = ['chat-latest', 'gpt-5.4', 'gpt-5.5', 'gpt-5.6-sol',
+    ...Array.from({ length: 28 }, (_, i) => `gpt-4o-2026-01-${String(i + 1).padStart(2, '0')}`)];
+  const otherIds = ['gpt-4o-realtime-preview', 'gpt-image-1', 'text-embedding-3-small'];
+  let calls = 0;
+  let allowed = true;
+  const { client } = await fixture(t, { modelListFetch: async (url, request) => {
+    calls++;
+    assert.equal(url, 'https://api.openai.com/v1/models');
+    assert.equal(request.method, 'GET');
+    assert.equal(request.headers.Authorization, `Bearer ${keyB}`);
+    assert.equal(request.redirect, 'error');
+    if (!allowed) return Response.json({ error: { message: keyB } }, { status: 403 });
+    return Response.json({ object: 'list', data: [...chatIds, ...otherIds, 'gpt-5.6-sol'].map(id => ({ id })) });
+  } });
+  const member = await client();
+  const administrator = await client();
+  const discovery = '/api/admin/models/available';
+  assert.equal((await administrator.request('GET', discovery)).status, 401);
+  await register(member, 'alice');
+  await member.request('PUT', '/api/account/api-key', { apiKey: keyA });
+  assert.equal((await member.request('GET', discovery)).status, 403);
+  await loginAdmin(administrator);
+  assert.equal((await administrator.request('GET', discovery)).data.code, 'api_key_required');
+  assert.equal(calls, 0);
+
+  assert.equal((await administrator.request('PUT', '/api/account/api-key', { apiKey: keyB })).status, 200);
+  const response = await administrator.request('GET', discovery);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('cache-control'), /no-store/);
+  assert.deepEqual(response.data.models.map(model => model.id).sort(), [...chatIds].sort());
+  assert.deepEqual(response.data.otherModels, otherIds);
+  assert.ok(response.data.models.every(model => !model.enabled));
+  assert.ok(!(await member.request('GET', '/api/session')).data.chatModels.some(model => model.id === 'gpt-5.6-sol'));
+
+  const settings = (await administrator.request('GET', '/api/admin/models')).data;
+  const sol = response.data.models.find(model => model.id === 'gpt-5.6-sol');
+  const legacy = response.data.models.find(model => model.id === 'gpt-5.4');
+  const saved = await administrator.request('PUT', '/api/admin/models', {
+    revision: settings.revision, defaultModel: sol.id,
+    models: [{ ...sol, enabled: true }, { ...legacy, enabled: true }, ...settings.models],
+  });
+  assert.equal(saved.status, 200);
+  const session = (await member.request('GET', '/api/session')).data;
+  assert.equal(session.defaultChatModel, 'gpt-5.6-sol');
+  assert.deepEqual(session.chatModels.slice(0, 2).map(model => [model.id, model.defaultEffort]), [
+    ['gpt-5.6-sol', 'medium'], ['gpt-5.4', 'none'],
+  ]);
+  assert.ok(session.chatModels[0].efforts.includes('max'));
+  assert.ok(!session.chatModels[1].efforts.includes('max'));
+  assert.equal(calls, 1);
+
+  allowed = false;
+  const failure = await administrator.request('GET', discovery);
+  assert.equal(failure.status, 502);
+  assert.equal(failure.data.code, 'model_list_forbidden');
+  assert.ok(!JSON.stringify(failure.data).includes(keyB));
+  assert.equal((await administrator.request('GET', '/api/admin/models')).data.revision, saved.data.revision);
 });
 
 test('a personal key allows zero-legacy-balance tasks, while old quota never substitutes for a key',async t=>{

@@ -340,6 +340,15 @@ h1, h2, h3, p { margin-top: 0; }
 .admin-model-order { display: flex; flex: none; gap: 2px; }
 .admin-model-order .icon-button { min-width: 36px; min-height: 36px; }
 .admin-model-save { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.admin-model-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 350px), 1fr)); align-items: start; gap: 24px; }
+.admin-model-group { display: grid; gap: 10px; min-width: 0; }
+.admin-models h3 { margin: 0; font-size: 14px; }
+.admin-model-tools { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 40px; }
+.admin-model-search { width: min(100%, 320px); padding: 8px 12px; }
+.admin-model-note { margin: 0; }
+.admin-model-scroll { max-height: 360px; overflow: auto; }
+.admin-model-other { min-height: 48px; flex-wrap: wrap; color: var(--muted); }
+.admin-model-other code { font-size: 13px; overflow-wrap: anywhere; }
 @media (max-width: 560px) {
   .composer.composer-chat { padding: 7px; }
   .composer-chat .composer-input-row, .composer-controls { gap: 3px; }
