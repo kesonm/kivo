@@ -1,7 +1,7 @@
 let csrfToken = '';
 
 export class ApiError extends Error {
-  constructor(message: string, public status: number) { super(message); this.name = 'ApiError'; }
+  constructor(message: string, public status: number, public code?: string) { super(message); this.name = 'ApiError'; }
 }
 
 export async function api<T>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
@@ -20,7 +20,8 @@ export async function api<T>(path: string, options: { method?: string; body?: un
   if (typeof data.csrfToken === 'string') csrfToken = data.csrfToken;
   if (!response.ok) {
     if (response.status === 401 && !['/api/auth/login', '/api/auth/register'].includes(path)) window.dispatchEvent(new Event('session-expired'));
-    throw new ApiError(typeof data.error === 'string' ? data.error : '请求未成功，请重试。', response.status);
+    throw new ApiError(typeof data.error === 'string' ? data.error : '请求未成功，请重试。', response.status,
+      typeof data.code === 'string' ? data.code : undefined);
   }
   return data as T;
 }

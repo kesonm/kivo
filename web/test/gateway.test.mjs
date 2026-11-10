@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGateway, prepareResponseRequest, makeSseParser, parseUsage } from '../server/gateway.mjs';
+import { defaultChatModelCatalog } from '../server/chat-models.mjs';
 
 // A deliberately configured legacy key must never be used as a fallback.
 const config = { model: 'test-model', apiKey: 'GLOBAL_MUST_NOT_USE', gatewayHost: '127.0.0.1', gatewayPort: 0, maxOutputTokens: 512 };
@@ -16,6 +17,7 @@ function fakeStore() {
     getUser: id => users.get(id),
     getUserApiKey: id => keys.get(id) || null,
     getApiKeyMetadata: id => ({ configured: keys.has(id) }),
+    getChatModelCatalog: defaultChatModelCatalog,
     beginUsage(userId, runId, metadata) { const id = `usage-${++sequence}`; pending.set(id, { userId, runId, ...metadata }); return id; },
     settleUsage(id, record) { const previous = pending.get(id); if (!previous) return; pending.delete(id); usage.push({ id, ...previous, ...record }); },
     keys, users, usage, pending,

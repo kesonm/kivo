@@ -11,7 +11,7 @@ import { loadCredentialsKey } from './credentials.mjs';
 import { createLocalBridge, localPath } from './local.mjs';
 import { createQrLogin } from './qr-login.mjs';
 import { attachmentDisposition, CHAT_UPLOAD_BODY_LIMIT, readChatMultipart } from './chat-files.mjs';
-import { chatModelOptions, isChatModel } from './chat-models.mjs';
+import { adminChatModelCatalog, chatModelOptions, resolveChatSelection } from './chat-models.mjs';
 import { createVoiceService } from './voice.mjs';
 
 const scrypt=promisify(scryptCallback);
@@ -133,7 +133,7 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
   function idle(projectId){if(store.getActiveRunForProject(projectId))throw new AppError('项目任务正在执行，请等待完成或停止任务后操作文件',409);}
   const fileAction=fn=>async(req,res)=>{const p=ownedProject(req);await projects.withLock(p.id,async()=>{idle(p.id);res.json(await fn(p,req));});};
 
-  async function startOwnedRun({ thread, project, userId, text, executionText = text, verificationCommand, resumedFromRunId, requestMessageId, tool, model, files = [], attachmentsOnly = false }) {
+  async function startOwnedRun({ thread, project, userId, text, executionText = text, verificationCommand, resumedFromRunId, requestMessageId, tool, model, reasoningEffort, files = [], attachmentsOnly = false }) {
     if (project) idle(project.id);
     if (!attachmentsOnly && !runtime.providerConfigured(userId)) throw new AppError('请先在个人设置中填写你的 OpenAI API 密钥', 409, 'api_key_required');
     const user = store.getUser(userId);
@@ -155,7 +155,7 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
         store.appendRunEvent(run.id, { kind: 'task', source, status: 'succeeded', summary: '已保存附件' }, 'task:end',
           { runPatch: { status: 'completed', output } });
       } else {
-        await runtime.start({ run, thread, project, user, text: executionText, tool, model, files });
+        await runtime.start({ run, thread, project, user, text: executionText, tool, model, reasoningEffort, files });
       }
     } catch (error) {
       if (message && !resumedFromRunId) store.deleteMessage(message.id);
@@ -173,7 +173,9 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
   app.get('/api/session',(req,res)=>{
     rate(req,'session',120,60_000);
     const session=req.session??setSession(res);
-    res.json({user:publicUser(req.user),csrfToken:session.csrfToken,providerConfigured:req.user?runtime.providerConfigured(req.user.id):false,model:config.model,chatModels:chatModelOptions(config.model)});
+    const catalog=store.getChatModelCatalog(config.model);
+    res.json({user:publicUser(req.user),csrfToken:session.csrfToken,providerConfigured:req.user?runtime.providerConfigured(req.user.id):false,
+      model:config.model,defaultChatModel:catalog.defaultModel,chatModels:chatModelOptions(catalog)});
   });
   app.get('/api/config',(req,res)=>res.json({registrationEnabled:true,providerConfigured:req.user?runtime.providerConfigured(req.user.id):false,model:config.model}));
   app.use('/api',(req,res,next)=>{
@@ -331,8 +333,12 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     const multipart=req.is('multipart/form-data');
     const body=multipart?await readChatMultipart(req.body,req.get('content-type')):req.body;
     const files=multipart?body.files:[];
-    const tool=body.tool??(files.length?'analyze':undefined),model=body.model;
-    if(model!==undefined&&(thread.projectId!==null||!isChatModel(model,config.model)))throw new AppError('此对话无法使用所选模型',400,'chat_model_invalid');
+    const tool=body.tool??(files.length?'analyze':undefined);
+    if(thread.projectId!==null&&(body.model!==undefined||body.reasoningEffort!==undefined)) {
+      throw new AppError('项目任务由执行器选择模型和思考档位',400,'chat_model_invalid');
+    }
+    const selection=thread.projectId===null
+      ?resolveChatSelection(store.getChatModelCatalog(config.model),body.model,body.reasoningEffort):{};
     if(tool!==undefined&&(!chatTools.has(tool)||project))throw new AppError('无效的聊天工具',400);
     if(tool==='analyze'&&!files.length)throw new AppError('请先添加要分析的附件',400);
     const noPrompt=body.text===undefined||(typeof body.text==='string'&&!body.text.trim());
@@ -341,7 +347,7 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     const text=requiredText(prompt,'消息',24000);
     if(thread.projectId!==null&&(!project||project.userId!==req.user.id))throw new AppError('项目不存在',404);
     const verificationCommand=verificationCommandFor(body.verificationCommand,project);
-    const start=()=>startOwnedRun({thread,project,userId:req.user.id,text,tool,model,files,attachmentsOnly,verificationCommand});
+    const start=()=>startOwnedRun({thread,project,userId:req.user.id,text,tool,...selection,files,attachmentsOnly,verificationCommand});
     const run=project?await projects.withLock(project.id,start):await start();
     res.status(202).json({run});
   });
@@ -407,8 +413,15 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     },15000);
     res.on('close',()=>{clearInterval(heartbeat);if(typeof unsubscribe==='function')unsubscribe();});
   });
-  // Administration is deliberately read-only. No quota, user-mutation, password
-  // reset, key retrieval, or key replacement endpoint exists for administrators.
+  // User, usage and conversation records remain read-only in administration.
+  app.get('/api/admin/models',admin,(req,res)=>{
+    checkedQuery(req,[]);
+    res.json(adminChatModelCatalog(store.getChatModelCatalog(config.model)));
+  });
+  app.put('/api/admin/models',admin,(req,res)=>{
+    rate(req,'admin-models',30,60_000);
+    res.json(adminChatModelCatalog(store.setChatModelCatalog(req.body,req.user.id)));
+  });
   app.get('/api/admin/users',admin,(req,res)=>{store.audit(req.user.id,'admin.users.viewed','all');res.json({users:store.listUsers()});});
   app.get('/api/admin/usage',admin,(req,res)=>{
     checkedQuery(req,['userId','limit','offset']);const options={userId:filterUser(req),...page(req)};

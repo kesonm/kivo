@@ -70,7 +70,7 @@ export async function readChatMultipart(body, contentType) {
   const files = [], tableNames = new Set(), fields = {};
   let total = 0;
   for (const [key, value] of form) {
-    if ((key === 'text' || key === 'tool' || key === 'model') && typeof value === 'string' && !Object.hasOwn(fields, key)) {
+    if (['text', 'tool', 'model', 'reasoningEffort'].includes(key) && typeof value === 'string' && !Object.hasOwn(fields, key)) {
       fields[key] = value;
       continue;
     }

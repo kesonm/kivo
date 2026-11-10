@@ -427,7 +427,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       }
       throw new GatewayError('无法确认上一次任务已安全退出，请稍后重试。', 409);
     },
-    async start({ run, thread, project, user, text, tool, model, files = [] }) {
+    async start({ run, thread, project, user, text, tool, model, reasoningEffort, files = [] }) {
       assertCapacity();
       const account = user?.id && store.getUser(user.id);
       if (!account || account.disabled) throw new GatewayError('账号已停用。', 403);
@@ -474,7 +474,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
         checkAccount();
         const state = { kind: 'chat', run, thread, project: null, user, token: '', output: '', logs: [], artifacts: [], citations: [], pendingImageActivity: [], pending: new Map(), finishing: null, chatController: new AbortController() };
         state.token = gateway.authorizeRun({ id: run.id, userId: user.id,
-          chatModel: model, chatTools: payload.tools.map(tool => tool.type),
+          chatModel: model, reasoningEffort, chatTools: payload.tools.map(tool => tool.type),
           chatFiles: files.filter(file => file.kind === 'table').map(file => ({ ...file, name: file.analysisName ?? file.name })) });
         active.set(run.id, state);
         startingProjects.delete(operationKey); startingUsers.delete(user.id);
