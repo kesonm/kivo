@@ -1,20 +1,16 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { api, dateTime, enc, messageOf } from './api';
+import { ChatComposer } from './ChatComposer';
 import { AttachmentChips, ChatImages, Markdown } from './ChatContent';
 import { Icon, Logo } from './icons';
 import { getDirtyFile } from './navigation';
 import { Files } from './Files';
 import { LocalApprovals } from './Local';
 import { ErrorBox, Loading, StatusBadge, useDialog, useNotice } from './ui';
-import type { ChatTool, Message, Project, Run, Thread, User } from './types';
+import type { ChatModelOption, ChatTool, Message, Project, Run, Thread, User } from './types';
 
-const chatFileExtensions = ['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.txt', '.md', '.csv', '.tsv', '.json', '.xlsx', '.docx', '.pptx'];
 const chatFileCount = 4;
 const chatFileBytes = 8 * 1024 * 1024;
-const chatModes = [
-  { tool: 'image', icon: 'image', label: '生成图片', placeholder: '描述你想生成的图片' },
-  { tool: 'search', icon: 'search', label: '联网搜索', placeholder: '你想从网上查找什么？' },
-] as const;
 const starters = [
   { icon: 'code', title: '从零构建', text: '帮我创建一个简洁的项目起始结构，并说明如何运行。' },
   { icon: 'search', title: '了解项目', text: '阅读这个项目，梳理目录结构、主要功能和可以改进的地方。' },
@@ -26,9 +22,9 @@ const chatStarters = [
   { icon: 'edit', title: '润色文字', text: '我想润色一段文字。请先问我文字的用途和希望的语气。' },
 ];
 
-export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged, user, providerConfigured, model, refreshSession, onRenameProject, onDeleteProject, onOpenAccount, onOpenLocal }: {
+export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged, user, providerConfigured, model, chatModels, refreshSession, onRenameProject, onDeleteProject, onOpenAccount, onOpenLocal }: {
   project: Project | null; threadId: string | null; onThreadCreated: (thread: Thread) => void; onThreadsChanged: () => void;
-  user: User; providerConfigured: boolean; model?: string; refreshSession: () => Promise<void>;
+  user: User; providerConfigured: boolean; model?: string; chatModels?: ChatModelOption[]; refreshSession: () => Promise<void>;
   onRenameProject: () => void; onDeleteProject: () => void; onOpenAccount: () => void; onOpenLocal: () => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -39,6 +35,7 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const [stopping, setStopping] = useState(false);
   const [input, setInput] = useState('');
   const [selectedTool, setSelectedTool] = useState<Exclude<ChatTool, 'analyze'>>('auto');
+  const [selectedModel, setSelectedModel] = useState<string>();
   const [attachments, setAttachments] = useState<File[]>([]);
   const [error, setError] = useState('');
   const [connectionLost, setConnectionLost] = useState(false);
@@ -48,7 +45,6 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const [scrolledUp, setScrolledUp] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
-  const fileInput = useRef<HTMLInputElement>(null);
   const pinBottom = useRef(true);
   const threadRef = useRef(threadId); threadRef.current = threadId;
   const newlyCreatedThread = useRef<string | null>(null);
@@ -59,6 +55,8 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const running = run?.status === 'running';
   const composerBusy = loading || sending || running;
   const chatTool = attachments.length ? 'analyze' : selectedTool;
+  const modelOptions = chatModels ?? (model ? [{ id: model, label: model, description: '' }] : []);
+  const chatModel = modelOptions.some(option => option.id === selectedModel) ? selectedModel : modelOptions.find(option => option.id === model)?.id ?? modelOptions[0]?.id;
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; ++loadSequence.current; };
@@ -126,14 +124,13 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   useEffect(followOutput, [followOutput, messages, run?.output, run?.logs?.length, loading]);
   useEffect(() => { if (textarea.current) { textarea.current.style.height = 'auto'; textarea.current.style.height = `${Math.min(160, textarea.current.scrollHeight)}px`; } }, [input]);
 
-  function attachFiles(selection: FileList | null) {
-    const files = Array.from(selection ?? []);
-    if (!files.length) return;
-    const invalid = files.find(file => !file.size || !chatFileExtensions.some(ext => file.name.toLowerCase().endsWith(ext)));
-    if (invalid) { notify(`无法使用附件「${invalid.name}」。请选择非空的文档、表格、文本或图片。`, 'error'); return; }
+  function attachFiles(files: File[]) {
+    if (!files.length || composerBusy) return;
+    const empty = files.find(file => !file.size);
+    if (empty) { notify(`附件「${empty.name}」是空文件。`, 'error'); return; }
     const next = [...attachments, ...files];
     if (next.length > chatFileCount || next.reduce((sum, file) => sum + file.size, 0) > chatFileBytes) {
-      notify('每条消息最多添加 4 个附件，总大小不超过 8 MB。', 'error');
+      notify('每条消息最多添加 4 个附件，总大小不超过 8 MiB。', 'error');
       return;
     }
     setAttachments(next);
@@ -158,11 +155,12 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
         if (mounted.current) { threadRef.current = id; newlyCreatedThread.current = id; }
         onThreadCreated(created.thread);
       }
-      let body: { text: string; tool?: ChatTool } | FormData = project ? { text } : { text, tool: chatTool };
+      let body: { text: string; tool?: ChatTool; model?: string } | FormData = project ? { text } : { text, tool: chatTool, model: chatModel };
       if (hasFiles) {
         const form = new FormData();
         form.set('text', text);
         form.set('tool', 'analyze');
+        if (chatModel) form.set('model', chatModel);
         for (const file of attachments) form.append('files', file);
         body = form;
       }
@@ -193,35 +191,21 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const lastAssistant = [...messages].reverse().find(message => message.role === 'assistant');
   const showRunOutput = run && (running || (!!run.output && lastAssistant?.content !== run.output));
   const emptyConversation = !loading && messages.length === 0 && !running;
-  const chatPlaceholder = chatTool === 'analyze' ? '你想了解附件中的哪些内容？' : chatModes.find(mode => mode.tool === chatTool)?.placeholder;
   const composer = <div className="composer-area">
     {scrolledUp && !emptyConversation && <button className="scroll-bottom" onClick={() => { pinBottom.current = true; scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: 'smooth' }); }}><Icon name="down" size={16} />回到最新消息</button>}
     {connectionLost && <div className="connection-note"><span className="spinner" />连接已断开，正在自动恢复任务状态…</div>}
     {error && <ErrorBox error={error} onRetry={threadId ? () => void loadThread(threadId, true) : undefined} />}
-    <form className={'composer' + (project ? '' : ' composer-chat') + (running ? ' composer-running' : '')} onSubmit={send}>
-      {!project && attachments.length > 0 && <AttachmentChips files={attachments} disabled={composerBusy} onRemove={index => setAttachments(files => files.filter((_, i) => i !== index))} />}
+    {project ? <form className={'composer' + (running ? ' composer-running' : '')} onSubmit={send}>
       <div className="composer-input-row">
-        {project && <button type="button" className="icon-button composer-attach" title="项目文件、上传与代码差异" aria-label="打开项目文件" onClick={() => void changePanel(true)}><Icon name="plus" size={23} /></button>}
-        {!project && <button type="button" className="icon-button composer-attach" title="打开本地文件夹开始项目对话" aria-label="打开本地文件夹" disabled={running || sending} onClick={onOpenLocal}><Icon name="folder" size={21} /></button>}
-        <textarea ref={textarea} value={input} onChange={event => setInput(event.target.value)} placeholder={running ? 'kivo 正在执行任务…' : chatPlaceholder || '有问题，尽管问'} aria-label="发送给 kivo 的消息" disabled={composerBusy} maxLength={24000} rows={1} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
+        <button type="button" className="icon-button composer-attach" title="项目文件、上传与代码差异" aria-label="打开项目文件" onClick={() => void changePanel(true)}><Icon name="plus" size={23} /></button>
+        <textarea ref={textarea} value={input} onChange={event => setInput(event.target.value)} placeholder={running ? 'kivo 正在执行任务…' : '有问题，尽管问'} aria-label="发送给 kivo 的消息" disabled={composerBusy} maxLength={24000} rows={1} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
         <span className="composer-model" title="当前模型">{model || '默认模型'}</span>
-        {running ? <button type="button" className="send-button stop-button" title="停止任务" aria-label="停止任务" disabled={stopping} onClick={() => void interrupt()}>{stopping ? <span className="spinner" /> : <Icon name="stop" size={17} />}</button> : <button type="submit" className="send-button" title="发送消息" aria-label="发送消息" disabled={(!input.trim() && (project !== null || !attachments.length)) || composerBusy || !providerConfigured}>{sending ? <span className="spinner" /> : <Icon name="send" size={21} />}</button>}
+        {running ? <button type="button" className="send-button stop-button" title="停止任务" aria-label="停止任务" disabled={stopping} onClick={() => void interrupt()}>{stopping ? <span className="spinner" /> : <Icon name="stop" size={17} />}</button> : <button type="submit" className="send-button" title="发送消息" aria-label="发送消息" disabled={!input.trim() || composerBusy || !providerConfigured}>{sending ? <span className="spinner" /> : <Icon name="send" size={21} />}</button>}
       </div>
-      {!project && <div className="composer-chat-tools" role="group" aria-label="本条消息使用的工具">
-        {chatModes.map(mode => <button key={mode.tool} type="button" className="chat-tool-button" aria-pressed={chatTool === mode.tool}
-          disabled={composerBusy || attachments.length > 0} onClick={() => { setSelectedTool(old => old === mode.tool ? 'auto' : mode.tool); textarea.current?.focus(); }}>
-          <Icon name={mode.icon} size={15} />{mode.label}
-        </button>)}
-        <input type="file" ref={fileInput} accept={chatFileExtensions.join(',')} multiple hidden onChange={event => {
-          attachFiles(event.currentTarget.files);
-          event.currentTarget.value = '';
-        }} />
-        <button type="button" className={'chat-tool-button' + (attachments.length ? ' active' : '')} disabled={composerBusy || attachments.length >= chatFileCount}
-          title="选择最多 4 个附件，总大小不超过 8 MB" onClick={() => fileInput.current?.click()}>
-          <Icon name="file" size={15} />{attachments.length ? '添加附件' : '分析文件'}
-        </button>
-      </div>}
-    </form>
+    </form> : <ChatComposer draft={input} setDraft={setInput} textarea={textarea} attachments={attachments} onAttach={attachFiles}
+      onRemove={index => setAttachments(files => files.filter((_, i) => i !== index))} tool={chatTool} onTool={setSelectedTool}
+      model={chatModel} models={modelOptions} onModel={setSelectedModel} threadId={threadId} providerConfigured={providerConfigured}
+      busy={composerBusy} running={running} sending={sending} stopping={stopping} onSend={send} onStop={() => void interrupt()} onOpenLocal={onOpenLocal} />}
     <div className="composer-footer">{project && <button type="button" className="composer-project" onClick={() => void changePanel(true)} title="查看项目文件"><Icon name="folder" size={13} /><span>{project.name}{project.location === 'local' ? ' · 本地电脑' : ' · 云端'}</span></button>}<span>管理员可查看会话与执行记录</span><span className="composer-shortcut">Shift + Enter 换行</span></div>
   </div>;
   return <div className={'workspace-body' + (panelOpen ? ' with-panel' : '')}>

@@ -5,10 +5,6 @@ export const CHAT_UPLOAD_LIMIT = 8 * 1024 * 1024;
 export const CHAT_UPLOAD_BODY_LIMIT = CHAT_UPLOAD_LIMIT + 64 * 1024;
 const MAX_FILES = 4;
 const TYPES = new Map([
-  ['.png', ['image/png', 'image']],
-  ['.jpg', ['image/jpeg', 'image']],
-  ['.jpeg', ['image/jpeg', 'image']],
-  ['.webp', ['image/webp', 'image']],
   ['.pdf', ['application/pdf', 'document']],
   ['.docx', ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'document']],
   ['.pptx', ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'document']],
@@ -27,40 +23,67 @@ export function imageType(data) {
   return null;
 }
 
-function matchesType(data, mimeType, kind) {
-  if (kind === 'image') return imageType(data) === mimeType;
-  if (mimeType === 'application/pdf') return data.subarray(0, 1024).includes('%PDF-');
-  if (mimeType.startsWith('application/vnd.openxmlformats-')) return data.length >= 4 && data.readUInt32LE(0) === 0x04034b50;
-  if (data.includes(0)) return false;
-  try { new TextDecoder('utf-8', { fatal: true }).decode(data); return true; } catch { return false; }
+function isPlainText(data) {
+  if (!data.length || data.includes(0)) return false;
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(data);
+    return !/[\x01-\x08\x0b-\x0c\x0e-\x1f\x7f]/.test(text);
+  } catch { return false; }
+}
+
+function classifyFile(name, data) {
+  const image = imageType(data);
+  if (image) return [image, 'image'];
+  const known = TYPES.get(path.extname(name).toLowerCase());
+  const mimeType = known?.[0] ?? '';
+  const pdf = mimeType === 'application/pdf';
+  const office = mimeType.startsWith('application/vnd.openxmlformats-');
+  if (pdf && data.subarray(0, 1024).includes('%PDF-')) return known;
+  if (office && data.length >= 4 && data.readUInt32LE(0) === 0x04034b50) return known;
+  if (!isPlainText(data)) return ['application/octet-stream', 'opaque'];
+  return known && !pdf && !office ? known : ['text/plain', 'text'];
+}
+
+function tableFilename(name, used) {
+  const extension = path.extname(name);
+  const stem = name.slice(0, -extension.length);
+  let result = name;
+  for (let number = 2; used.has(result.toLowerCase()); number++) {
+    const suffix = ' (' + number + ')' + extension;
+    result = stem.slice(0, 200 - suffix.length).toWellFormed() + suffix;
+  }
+  used.add(result.toLowerCase());
+  return result;
+}
+
+export function attachmentDisposition(name) {
+  const fallback = name.replace(/[^\x20-\x7e]|["\\/%]/g, '_');
+  const encoded = encodeURIComponent(name.toWellFormed())
+    .replace(/['()*]/g, char => '%' + char.charCodeAt(0).toString(16).toUpperCase());
+  return 'attachment; filename="' + fallback + '"; filename*=UTF-8\'\'' + encoded;
 }
 
 export async function readChatMultipart(body, contentType) {
   let form;
   try { form = await new Response(body, { headers: { 'content-type': contentType } }).formData(); }
   catch { throw new AppError('附件上传格式无效', 400); }
-  const files = [], names = new Set(), fields = {};
+  const files = [], tableNames = new Set(), fields = {};
   let total = 0;
   for (const [key, value] of form) {
-    if ((key === 'text' || key === 'tool') && typeof value === 'string' && !Object.hasOwn(fields, key)) {
+    if ((key === 'text' || key === 'tool' || key === 'model') && typeof value === 'string' && !Object.hasOwn(fields, key)) {
       fields[key] = value;
       continue;
     }
     if (key !== 'files' || typeof value === 'string') throw new AppError('附件上传字段无效', 400);
     if (files.length >= MAX_FILES) throw new AppError('一条消息最多可以添加 4 个附件', 400);
     const name = value.name.normalize('NFC').trim();
-    if (!name || name.length > 200 || /[\\/\x00-\x1f\x7f]/.test(name)) throw new AppError('附件名称无效', 400);
-    if (names.has(name.toLowerCase())) throw new AppError('请为同一条消息中的附件使用不同的文件名', 400);
-    names.add(name.toLowerCase());
-    const type = TYPES.get(path.extname(name).toLowerCase());
-    if (!type) throw new AppError('不支持此附件格式', 415);
+    if (!name || name === '.' || name === '..' || name.length > 200 || /[\\/\x00-\x1f\x7f]/.test(name)) throw new AppError('附件名称无效', 400);
     total += value.size;
-    if (!value.size) throw new AppError('附件不能为空', 400);
     if (total > CHAT_UPLOAD_LIMIT) throw new AppError('附件合计不能超过 8 MiB', 413);
-    const [mimeType, kind] = type;
     const data = Buffer.from(await value.arrayBuffer());
-    if (!matchesType(data, mimeType, kind)) throw new AppError('附件内容与扩展名不符，文本附件需使用 UTF-8', 415);
-    files.push({ name, mimeType, kind, size: data.length, data });
+    const [mimeType, kind] = classifyFile(name, data);
+    const analysisName = kind === 'table' ? tableFilename(name, tableNames) : name;
+    files.push({ name, mimeType, kind, size: data.length, data, ...(analysisName !== name ? { analysisName } : {}) });
   }
   return { ...fields, files };
 }

@@ -132,24 +132,52 @@ test('ordinary chat, images, web citations and multipart analysis work through H
   assert.deepEqual(Buffer.from(await download.arrayBuffer()), picture);
   assert.equal((await bob.request('GET', artifacts[0].url)).status, 404);
 
-  const search = await toolTurn({ text: '联网查资料', tool: 'search' }, [{ type: 'message', id: 'web-answer', role: 'assistant',
+  const modelList = (await restored.request('GET', '/api/session')).data.chatModels.map(option => option.id);
+  assert.ok(modelList.includes('gpt-6-astra'));
+  const invalidModel = await restored.request('POST', `/api/threads/${a.id}/turns`, { text: 'test', model: 'arbitrary-model' });
+  assert.equal(invalidModel.status, 400);
+  assert.equal(invalidModel.data.code, 'chat_model_invalid');
+  const search = await toolTurn({ text: '联网查资料', tool: 'search', model: 'gpt-6-astra' }, [{ type: 'message', id: 'web-answer', role: 'assistant',
     content: [{ type: 'output_text', text: '这是引用', annotations: [
       { type: 'url_citation', start_index: 0, end_index: 4, url: 'https://example.org/source', title: '资料' },
       { type: 'url_citation', start_index: 0, end_index: 4, url: 'javascript:alert(1)', title: 'Invalid' },
     ] }] }]);
   assert.deepEqual(search.call.payload.tools, [{ type: 'web_search' }]);
+  assert.equal(search.call.payload.model, 'gpt-6-astra');
+  const usageForSearch = (await restored.request('GET', '/api/account/usage')).data.usage.find(record => record.runId === search.run.id);
+  assert.equal(usageForSearch.model, 'gpt-6-astra');
   assert.deepEqual(search.messages.at(-1).citations, [{ url: 'https://example.org/source', title: '资料', startIndex: 0, endIndex: 4 }]);
 
   const form = new FormData();
   form.set('tool', 'analyze');
   form.set('text', '计算合计');
+  form.set('model', 'gpt-6-luna');
   form.append('files', new Blob(['value\n3\n5\n'], { type: 'text/csv' }), 'sales.csv');
   form.append('files', new Blob(['%PDF-1.4 fixture'], { type: 'application/pdf' }), 'notes.pdf');
   const analysis = await toolTurn(form, [{ type: 'message', id: 'file-answer', role: 'assistant', content: [{ type: 'output_text', text: '合计 8' }] }]);
   assert.deepEqual(analysis.call.payload.tool_choice, { type: 'code_interpreter' });
+  assert.equal(analysis.call.payload.model, 'gpt-6-luna');
   assert.deepEqual(analysis.call.payload.tools[0].container.file_ids, ['file-csvfixture']);
   assert.equal(analysis.call.payload.input.at(-1).content.at(-1).type, 'input_file');
   assert.deepEqual(analysis.messages.at(-2).attachments.map(file => file.name), ['sales.csv', 'notes.pdf']);
   assert.deepEqual(uploadedFiles, [{ name: 'sales.csv', text: 'value\n3\n5\n', authorization: `Bearer ${keyA}` }]);
   assert.deepEqual(removedFiles, [`Bearer ${keyA}`]);
+
+  const before = calls.length;
+  const archive = new FormData();
+  const bytes = new Uint8Array([80, 75, 3, 4, 0, 255, 1]);
+  archive.set('files', new Blob([bytes], { type: 'application/zip' }), '样例.zip');
+  const archived = await restored.request('POST', `/api/threads/${a.id}/turns`, archive);
+  assert.equal(archived.status, 202);
+  assert.equal(archived.data.run.status, 'completed');
+  assert.equal(calls.length, before);
+  const record = (await restored.request('GET', `/api/threads/${a.id}`)).data.messages.at(-2);
+  const attachment = record.attachments[0];
+  assert.equal(attachment.name, '样例.zip');
+  assert.equal(attachment.analyzable, false);
+  const original = await restored.request('GET', attachment.url, undefined, true);
+  assert.equal(original.headers.get('content-type'), 'application/octet-stream');
+  assert.match(original.headers.get('content-disposition'), /^attachment;.*filename\*=UTF-8''%E6%A0%B7%E4%BE%8B.zip/);
+  assert.deepEqual(new Uint8Array(await original.arrayBuffer()), bytes);
+  assert.equal((await bob.request('GET', attachment.url)).status, 404);
 });

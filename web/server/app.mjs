@@ -10,7 +10,9 @@ import { createProjects } from './projects.mjs';
 import { loadCredentialsKey } from './credentials.mjs';
 import { createLocalBridge, localPath } from './local.mjs';
 import { createQrLogin } from './qr-login.mjs';
-import { CHAT_UPLOAD_BODY_LIMIT, readChatMultipart } from './chat-files.mjs';
+import { attachmentDisposition, CHAT_UPLOAD_BODY_LIMIT, readChatMultipart } from './chat-files.mjs';
+import { chatModelOptions, isChatModel } from './chat-models.mjs';
+import { createVoiceService } from './voice.mjs';
 
 const scrypt=promisify(scryptCallback);
 const cookieName='cw_session';
@@ -57,7 +59,7 @@ export async function bootstrapAdmin(store,config){
   store.createUser({username:validUsername(config.adminUsername??'admin'),displayName:'管理员',passwordHash:await hashPassword(password),role:'admin'});
 }
 
-export function createApp({store,runtime,config,local=null,projects:createProjectsOverride}){
+export function createApp({store,runtime,config,local=null,voice=createVoiceService({store}),projects:createProjectsOverride}){
   const app=express();const projects=createProjectsOverride??createProjects(config);const limits=new Map();const loginFailures=new Map();
   let uploadsInProgress=0;
   const qrLogin=createQrLogin(store,config.publicOrigin||'https://kivo.iptnet.xyz');
@@ -65,8 +67,8 @@ export function createApp({store,runtime,config,local=null,projects:createProjec
   app.disable('x-powered-by');app.set('trust proxy',config.trustProxy??false);
   app.use((req,res,next)=>{
     res.set({'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'same-origin',
-      'Permissions-Policy':'camera=(), microphone=(), geolocation=()',
-      'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; form-action 'self'"});
+      'Permissions-Policy':'camera=(), microphone=(self), geolocation=()',
+      'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; form-action 'self'"});
     if(config.cookieSecure)res.set('Strict-Transport-Security','max-age=31536000');
     if(req.path.startsWith('/api/'))res.set('Cache-Control','no-store');next();
   });
@@ -111,6 +113,11 @@ export function createApp({store,runtime,config,local=null,projects:createProjec
     res.setHeader('Set-Cookie',`${cookieName}=${session.token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400${config.cookieSecure?'; Secure':''}`);
   }
   function auth(req,res,next){if(!req.user)throw new AppError('请先登录',401);next();}
+  function responseSignal(res){
+    const controller=new AbortController();
+    res.once('close',()=>{if(!res.writableEnded)controller.abort();});
+    return controller.signal;
+  }
   function admin(req,res,next){if(!req.user)throw new AppError('请先登录',401);if(req.user.role!=='admin')throw new AppError('仅管理员可访问',403);next();}
   function ownedProject(req){const project=store.getProject(req.params.id);if(!project||project.userId!==req.user.id)throw new AppError('项目不存在',404);return project;}
   function ownedThread(req){const thread=store.getThread(req.params.id);if(!thread||thread.userId!==req.user.id)throw new AppError('对话不存在',404);return thread;}
@@ -122,7 +129,7 @@ export function createApp({store,runtime,config,local=null,projects:createProjec
   app.get('/api/session',(req,res)=>{
     rate(req,'session',120,60_000);
     const session=req.session??setSession(res);
-    res.json({user:publicUser(req.user),csrfToken:session.csrfToken,providerConfigured:req.user?runtime.providerConfigured(req.user.id):false,model:config.model});
+    res.json({user:publicUser(req.user),csrfToken:session.csrfToken,providerConfigured:req.user?runtime.providerConfigured(req.user.id):false,model:config.model,chatModels:chatModelOptions(config.model)});
   });
   app.get('/api/config',(req,res)=>res.json({registrationEnabled:true,providerConfigured:req.user?runtime.providerConfigured(req.user.id):false,model:config.model}));
   app.use('/api',(req,res,next)=>{
@@ -168,12 +175,16 @@ export function createApp({store,runtime,config,local=null,projects:createProjec
     store.deleteSession(req.sessionToken);const session=setSession(res,user.id);store.audit(user.id,'account.login',user.id);
     res.json({user:publicUser(user),csrfToken:session.csrfToken});
   });
-  app.post('/api/auth/logout',(req,res)=>{store.deleteSession(req.sessionToken);const session=setSession(res);res.json({ok:true,csrfToken:session.csrfToken});});
+  app.post('/api/auth/logout',async(req,res)=>{
+    store.deleteSession(req.sessionToken);
+    if(req.user)await voice.stopForUser(req.user.id);
+    const session=setSession(res);res.json({ok:true,csrfToken:session.csrfToken});
+  });
   app.post('/api/auth/password',auth,async(req,res)=>{
     rate(req,'password',5,15*60_000);validPassword(req.body.newPassword);
     if(!await verifyPassword(req.body.currentPassword,store.getPasswordHash(req.user.id)))throw new AppError('当前密码不正确',400);
     store.setPassword(req.user.id,await hashPassword(req.body.newPassword),req.user.id);loginFailures.delete(req.user.username);
-    await Promise.allSettled(store.getActiveRunsForUser(req.user.id).map(run=>runtime.interrupt(run.id)));
+    await Promise.allSettled([voice.stopForUser(req.user.id),...store.getActiveRunsForUser(req.user.id).map(run=>runtime.interrupt(run.id))]);
     const session=setSession(res,req.user.id);res.json({ok:true,csrfToken:session.csrfToken});
   });
   const keyView=metadata=>({configured:metadata.configured,last4:metadata.last4,updatedAt:metadata.updatedAt});
@@ -190,16 +201,33 @@ export function createApp({store,runtime,config,local=null,projects:createProjec
     if(!store.getUser(req.query.userId))throw new AppError('用户不存在',404);return req.query.userId;
   }
   app.get('/api/account/api-key',auth,(req,res)=>res.json(keyView(store.getApiKeyMetadata(req.user.id))));
-  app.put('/api/account/api-key',auth,(req,res)=>{
+  app.put('/api/account/api-key',auth,async(req,res)=>{
     rate(req,'api-key-change',20,60*60_000);
     if(Object.keys(req.body).some(key=>key!=='apiKey'))throw new AppError('不能修改其他用户的密钥');
-    res.json(keyView(store.setUserApiKey(req.user.id,req.body.apiKey)));
+    const metadata=store.setUserApiKey(req.user.id,req.body.apiKey);
+    await voice.stopForUser(req.user.id);
+    res.json(keyView(metadata));
   });
-  app.delete('/api/account/api-key',auth,(req,res)=>{
+  app.delete('/api/account/api-key',auth,async(req,res)=>{
     if(Object.keys(req.body).length)throw new AppError('删除个人密钥无需指定用户或密钥');
-    res.json(keyView(store.deleteUserApiKey(req.user.id)));
+    const metadata=store.deleteUserApiKey(req.user.id);
+    await voice.stopForUser(req.user.id);
+    res.json(keyView(metadata));
   });
   app.get('/api/account/usage',auth,(req,res)=>{checkedQuery(req,['limit','offset']);res.json(store.getUsage({userId:req.user.id,...page(req)}));});
+  app.post('/api/voice/transcribe',auth,async(req,res)=>{
+    rate(req,'voice-transcribe:'+req.user.id,8,60_000);
+    res.json(await voice.transcribe(req.user.id,req.body,responseSignal(res)));
+  });
+  app.post('/api/voice/realtime',auth,async(req,res)=>{
+    rate(req,'voice-start:'+req.user.id,4,60_000);
+    res.json(await voice.startRealtime(req.user.id,req.body,responseSignal(res)));
+  });
+  app.post('/api/voice/realtime/stop',auth,async(req,res)=>{
+    rate(req,'voice-stop:'+req.user.id,30,60_000);
+    await voice.stopRealtime(req.user.id,req.body);
+    res.json({ok:true});
+  });
   app.get('/api/projects',auth,(req,res)=>res.json({projects:store.listProjects(req.user.id)}));
   if(local){
     app.get('/api/local-devices',auth,(req,res)=>res.json({devices:local.list(req.user.id)}));
@@ -235,8 +263,11 @@ export function createApp({store,runtime,config,local=null,projects:createProjec
   app.get('/api/threads/:id',auth,(req,res)=>{const thread=ownedThread(req);res.json({thread,messages:store.getMessages(thread.id),run:store.getLatestRun(thread.id)});});
   app.get('/api/chat-artifacts/:id',auth,(req,res)=>{
     const artifact=/^[a-f0-9-]{36}$/.test(req.params.id)&&store.getChatArtifact(req.params.id,req.user.id);
-    if(!artifact)throw new AppError('图片不存在',404);
-    res.set({'Content-Type':artifact.mimeType,'Content-Disposition':'inline; filename="'+artifact.name+'"','Cross-Origin-Resource-Policy':'same-origin'});
+    if(!artifact)throw new AppError('文件不存在',404);
+    const upload=artifact.role==='user';
+    res.set({'Content-Type':upload?'application/octet-stream':artifact.mimeType,
+      'Content-Disposition':upload?attachmentDisposition(artifact.name):'inline; filename="'+artifact.name+'"',
+      'Cross-Origin-Resource-Policy':'same-origin'});
     res.send(Buffer.from(artifact.data));
   });
   app.post('/api/threads/:id/turns',auth,(req,res,next)=>{
@@ -256,23 +287,29 @@ export function createApp({store,runtime,config,local=null,projects:createProjec
     const multipart=req.is('multipart/form-data');
     const body=multipart?await readChatMultipart(req.body,req.get('content-type')):req.body;
     const files=multipart?body.files:[];
-    const tool=body.tool??(files.length?'analyze':undefined);
+    const tool=body.tool??(files.length?'analyze':undefined),model=body.model;
+    if(model!==undefined&&(thread.projectId!==null||!isChatModel(model,config.model)))throw new AppError('此对话无法使用所选模型',400,'chat_model_invalid');
     if(tool!==undefined&&(!chatTools.has(tool)||project))throw new AppError('无效的聊天工具',400);
     if(tool==='analyze'&&!files.length)throw new AppError('请先添加要分析的附件',400);
-    const prompt=files.length&&(body.text===undefined||(typeof body.text==='string'&&!body.text.trim()))
-      ?'请分析这些附件，概括要点并指出值得关注的问题。':body.text;
+    const noPrompt=body.text===undefined||(typeof body.text==='string'&&!body.text.trim());
+    const attachmentsOnly=noPrompt&&files.length>0&&files.every(file=>file.kind==='opaque');
+    const prompt=attachmentsOnly?'发送了附件。':files.length&&noPrompt?'请分析这些附件，概括要点并指出值得关注的问题。':body.text;
     const text=requiredText(prompt,'消息',24000);
     if(thread.projectId!==null&&(!project||project.userId!==req.user.id))throw new AppError('项目不存在',404);
     const start=async()=>{
       if(project)idle(project.id);
-      if(!runtime.providerConfigured(req.user.id))throw new AppError('请先在个人设置中填写你的 OpenAI API 密钥',409,'api_key_required');
+      if(!attachmentsOnly&&!runtime.providerConfigured(req.user.id))throw new AppError('请先在个人设置中填写你的 OpenAI API 密钥',409,'api_key_required');
       const user=store.getUser(req.user.id);if(!user||user.disabled)throw new AppError('账号已停用',403);
       if(store.getActiveRunsForUser(user.id).length>=1)throw new AppError('你已有一个任务在运行，请等待完成',409);
       const run=store.createRun(thread.id,user.id);
       let message;
       try{
-        message=store.appendMessage(thread.id,'user',text,{attachments:files.map(({name,mimeType,size})=>({name,mimeType,size}))});
-        await runtime.start({run,thread,project,user,text,tool,files});
+        message=store.appendMessage(thread.id,'user',text,{uploads:files});
+        if(attachmentsOnly){
+          const output='附件已保存，可以点击文件名下载。当前无法读取这些文件的内容。';
+          store.appendMessage(thread.id,'assistant',output);
+          store.updateRun(run.id,{status:'completed',output});
+        }else await runtime.start({run,thread,project,user,text,tool,model,files});
       }catch(error){
         if(message)store.deleteMessage(message.id);
         store.updateRun(run.id,{status:'failed',error:error.message});
@@ -338,11 +375,12 @@ export async function startServer(config=loadConfig()){
   credentialsKey.fill(0);
   await bootstrapAdmin(store,config);store.reconcileInterruptedRuns();
   const {createRuntime}=await import('./runtime.mjs');
-  const local=createLocalBridge({store,config}),runtime=await createRuntime({store,config,local}),app=createApp({store,runtime,config,local});
+  const local=createLocalBridge({store,config}),runtime=await createRuntime({store,config,local}),voice=createVoiceService({store});
+  const app=createApp({store,runtime,config,local,voice});
   const server=app.listen(config.port,config.host,()=>console.log(JSON.stringify({event:'listening',port:config.port,model:config.model,userProvidedKeys:true})));
   server.requestTimeout=120000;server.headersTimeout=15000;
   let closing=false;
-  const close=async()=>{if(closing)return;closing=true;server.close();await runtime.close();store.close();};
+  const close=async()=>{if(closing)return;closing=true;server.close();await Promise.allSettled([runtime.close(),voice.close()]);store.close();};
   process.once('SIGTERM',()=>close().finally(()=>process.exit(0)));process.once('SIGINT',()=>close().finally(()=>process.exit(0)));
   return {app,server,store,runtime,close};
 }

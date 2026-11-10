@@ -333,35 +333,40 @@ export function createStore(dbPath,{credentialsKey}={}) {
       const t=api.getThread(threadId);if(!t)throw new AppError('对话不存在',404);
       db.prepare('UPDATE threads SET title=?,codex_thread_id=?,updated_at=? WHERE id=?').run(patch.title??t.title,patch.codexThreadId??t.codexThreadId,now(),threadId);return api.getThread(threadId);
     },
-    appendMessage(threadId,role,content,{attachments=[],citations=[],artifacts=[]}={}) {
+    appendMessage(threadId,role,content,{attachments=[],citations=[],artifacts=[],uploads=[]}={}) {
+      if(uploads.length&&(role!=='user'||artifacts.length||attachments.length))throw new AppError('附件只能保存到对应的用户消息');
       const messageId=id(),at=now(),metadata={};
       if(attachments.length)metadata.attachments=attachments;
       if(citations.length)metadata.citations=citations;
       return tx(()=>{
-        if(artifacts.length){
-          const bytes=artifacts.reduce((sum,artifact)=>sum+artifact.data.length,0);
+        const blobs=uploads.length?uploads:artifacts;
+        if(blobs.length){
+          const bytes=blobs.reduce((sum,artifact)=>sum+artifact.data.length,0);
           const total=db.prepare('SELECT coalesce(sum(size),0) n FROM chat_artifacts').get().n;
           const owner=db.prepare('SELECT user_id FROM threads WHERE id=?').get(threadId).user_id;
           const personal=db.prepare(`SELECT coalesce(sum(a.size),0) n FROM chat_artifacts a
             JOIN messages m ON m.id=a.message_id JOIN threads t ON t.id=m.thread_id WHERE t.user_id=?`).get(owner).n;
-          if(total+bytes>2*1024**3||personal+bytes>256*1024**2)throw new AppError('图片存储空间已满，本次图片无法保存',507,'chat_artifact_storage_full');
+          if(total+bytes>2*1024**3||personal+bytes>256*1024**2)throw new AppError(
+            uploads.length?'附件存储空间已满，本次附件无法保存':'图片存储空间已满，本次图片无法保存',
+            507,uploads.length?'chat_attachment_storage_full':'chat_artifact_storage_full');
         }
         db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(messageId,threadId,role,String(content).slice(0,4_000_000),at);
-        if(Object.keys(metadata).length)db.prepare('INSERT INTO chat_message_metadata VALUES(?,?)').run(messageId,JSON.stringify(metadata));
-        const saved=artifacts.map(artifact=>{
-          const row={id:id(),name:artifact.name,mime_type:artifact.mimeType,size:artifact.data.length};
+        const saved=blobs.map(artifact=>{
+          const row={id:id(),name:artifact.name,mime_type:uploads.length?'application/octet-stream':artifact.mimeType,size:artifact.data.length};
           db.prepare('INSERT INTO chat_artifacts VALUES(?,?,?,?,?,?)').run(row.id,messageId,row.name,row.mime_type,row.size,artifact.data);
           return artifactView(row);
         });
+        if(uploads.length)metadata.attachments=saved.map((file,index)=>({...file,mimeType:uploads[index].mimeType,analyzable:uploads[index].kind!=='opaque'}));
+        if(Object.keys(metadata).length)db.prepare('INSERT INTO chat_message_metadata VALUES(?,?)').run(messageId,JSON.stringify(metadata));
         db.prepare('UPDATE threads SET updated_at=? WHERE id=?').run(at,threadId);
         db.prepare('UPDATE projects SET updated_at=? WHERE id=(SELECT project_id FROM threads WHERE id=?)').run(at,threadId);
-        return {id:messageId,threadId,role,content,createdAt:at,...metadata,...(saved.length?{artifacts:saved}:{})};
+        return {id:messageId,threadId,role,content,createdAt:at,...metadata,...(artifacts.length?{artifacts:saved}:{})};
       });
     },
     getMessages(threadId) {
       const artifacts=new Map();
       for(const row of db.prepare(`SELECT a.id,a.name,a.mime_type,a.size,a.message_id FROM messages m
-        JOIN chat_artifacts a ON a.message_id=m.id WHERE m.thread_id=? ORDER BY a.rowid`).all(threadId)){
+        JOIN chat_artifacts a ON a.message_id=m.id WHERE m.thread_id=? AND m.role='assistant' ORDER BY a.rowid`).all(threadId)){
         if(!artifacts.has(row.message_id))artifacts.set(row.message_id,[]);
         artifacts.get(row.message_id).push(artifactView(row));
       }
@@ -372,7 +377,7 @@ export function createStore(dbPath,{credentialsKey}={}) {
       }));
     },
     getChatArtifact(artifactId,userId) {
-      return db.prepare(`SELECT a.name,a.mime_type mimeType,a.data FROM chat_artifacts a
+      return db.prepare(`SELECT a.name,a.mime_type mimeType,a.data,m.role FROM chat_artifacts a
         JOIN messages m ON m.id=a.message_id JOIN threads t ON t.id=m.thread_id
         WHERE a.id=? AND t.user_id=? AND t.project_id IS NULL`).get(artifactId,userId);
     },

@@ -67,15 +67,20 @@ export function Markdown({ content, citations }: { content: string; citations?: 
 }
 
 export function AttachmentChips({ files, onRemove, disabled }: {
-  files: Pick<MessageAttachment, 'name'>[];
+  files: Pick<MessageAttachment, 'name' | 'id' | 'url' | 'analyzable'>[];
   onRemove?: (index: number) => void;
   disabled?: boolean;
 }) {
-  return <ul className="chat-attachments" aria-label="附件">{files.map((file, index) => <li key={`${file.name}:${index}`} className="chat-attachment">
-    <Icon name="file" size={15} />
-    <span title={file.name}>{file.name}</span>
-    {onRemove && <button type="button" className="icon-button" title="移除附件" aria-label={`移除附件 ${file.name}`} disabled={disabled} onClick={() => onRemove(index)}><Icon name="close" size={14} /></button>}
-  </li>)}</ul>;
+  return <ul className="chat-attachments" aria-label="附件">{files.map((file, index) => {
+    const downloadable = file.id && /^[A-Za-z0-9_-]+$/.test(file.id) && file.url === `/api/chat-artifacts/${file.id}`;
+    return <li key={file.id ?? `${file.name}:${index}`} className="chat-attachment">
+      <Icon name="file" size={15} />
+      {downloadable ? <a className="chat-attachment-link" href={file.url} download={file.name} aria-label={`下载附件 ${file.name}`} title={file.analyzable === false ? `${file.name}（仅附件）` : file.name}>
+        <span>{file.name}</span><Icon name="download" size={13} />
+      </a> : <span title={file.name}>{file.name}</span>}
+      {onRemove && <button type="button" className="icon-button" title="移除附件" aria-label={`移除附件 ${file.name}`} disabled={disabled} onClick={() => onRemove(index)}><Icon name="close" size={14} /></button>}
+    </li>;
+  })}</ul>;
 }
 
 export function ChatImages({ artifacts, onLoad }: { artifacts: MessageArtifact[]; onLoad: () => void }) {

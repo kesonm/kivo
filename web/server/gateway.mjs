@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
+import { isChatModel } from './chat-models.mjs';
 
 const OPENAI_ORIGIN = 'https://api.openai.com/v1';
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -247,14 +248,15 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
   const activeRequests = new Set();
   let server, listening;
 
-  function authorizeRun({ id, userId, chatTools, chatFiles = [] }) {
+  function authorizeRun({ id, userId, chatTools, chatFiles = [], chatModel }) {
     if (chatTools !== undefined && (!Array.isArray(chatTools) || chatTools.some(type => !CHAT_TOOLS.has(type)))) {
       throw new GatewayError('无效的聊天工具权限。');
     }
     const files = validateChatFiles(chatFiles);
     if (files.length && !chatTools?.includes('code_interpreter')) throw new GatewayError('未启用文件分析工具。');
+    if (chatModel !== undefined && (!chatTools || !isChatModel(chatModel, config.model))) throw new GatewayError('该模型不可用于此任务。');
     const token = randomBytes(32).toString('base64url');
-    capabilities.set(token, { runId: id, userId, chatTools: chatTools && new Set(chatTools), chatFiles: files, expires: Date.now() + (config.runTimeoutMs || 20 * 60_000) + 60_000, inFlight: false, requestCount: 0, controllers: new Set(), tasks: new Set() });
+    capabilities.set(token, { runId: id, userId, model: chatModel ?? config.model, chatTools: chatTools && new Set(chatTools), chatFiles: files, expires: Date.now() + (config.runTimeoutMs || 20 * 60_000) + 60_000, inFlight: false, requestCount: 0, controllers: new Set(), tasks: new Set() });
     return token;
   }
 
@@ -303,7 +305,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
     const uploadedFileIds = [];
     const settle = (usage, status) => {
       if (!usageId || settled) return;
-      store.settleUsage(usageId, { ...usage, model: config.model, status });
+      store.settleUsage(usageId, { ...usage, model: cap.model, status });
       settled = true;
     };
     const markUnknownUsage = () => {
@@ -329,6 +331,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       cap.inFlight = true; ownsLock = true;
       const body = await readJson(req, cap.chatTools ? CHAT_GATEWAY_MAX_REQUEST_BYTES : MAX_REQUEST_BYTES);
       const payload = prepareResponseRequest(body, config, cap.chatTools);
+      payload.model = cap.model;
       if (cap.chatTools) payload.safety_identifier = createHash('sha256').update(`kivo-user:${cap.userId}`).digest('hex');
       // Resolve credentials only from the capability-bound user. The runner
       // receives this capability, never a real key or a global fallback key.
@@ -356,7 +359,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
           interpreter.container.file_ids = uploadedFileIds;
         }
         stage = 'request';
-        usageId = store.beginUsage(cap.userId, cap.runId, { model: config.model, keyLast4: apiKey.slice(-4) });
+        usageId = store.beginUsage(cap.userId, cap.runId, { model: cap.model, keyLast4: apiKey.slice(-4) });
         onStatus(cap.runId, '正在使用你保存的 OpenAI API 密钥调用模型…');
         upstreamStarted = true;
         const upstream = await fetchImpl(`${OPENAI_ORIGIN}/responses`, {

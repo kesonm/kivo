@@ -299,7 +299,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       state.approvals.delete(approvalId);
       store.audit(state.user.id, 'local.approval.' + decision, runId, approvalId);
     },
-    async start({ run, thread, project, user, text, tool, files = [] }) {
+    async start({ run, thread, project, user, text, tool, model, files = [] }) {
       if (closing) throw new GatewayError('服务正在重启，请稍后重试。', 503);
       const account = user?.id && store.getUser(user.id);
       if (!account || account.disabled) throw new GatewayError('账号已停用。', 403);
@@ -347,7 +347,8 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
         checkAccount();
         const state = { kind: 'chat', run, thread, project: null, user, token: '', output: '', logs: [], artifacts: [], citations: [], pending: new Map(), finishing: null, chatController: new AbortController() };
         state.token = gateway.authorizeRun({ id: run.id, userId: user.id,
-          chatTools: payload.tools.map(tool => tool.type), chatFiles: files.filter(file => file.kind === 'table') });
+          chatModel: model, chatTools: payload.tools.map(tool => tool.type),
+          chatFiles: files.filter(file => file.kind === 'table').map(file => ({ ...file, name: file.analysisName ?? file.name })) });
         active.set(run.id, state);
         startingProjects.delete(operationKey); startingUsers.delete(user.id);
         state.timeout = setTimeout(() => { void finish(state, 'interrupted', '回复达到运行时长上限，已停止。'); }, config.runTimeoutMs || 20 * 60_000);
