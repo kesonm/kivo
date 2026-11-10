@@ -62,7 +62,8 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [historySummary, setHistorySummary] = useState<KibotSummary | null>(null);
   const historyTrigger = useRef<HTMLButtonElement | null>(null);
-  const historyOverlay = useHistoryOverlay();
+  const workspaceElement = useRef<HTMLDivElement | null>(null);
+  const historyOverlay = useHistoryOverlay(workspaceElement);
   const initializedTask = useRef<string | null>(null);
   const timelineLoadedSignature = useRef('');
   const timelinePendingSignature = useRef('');
@@ -442,16 +443,16 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
       <span>管理员可查看会话与执行记录</span><span className="composer-shortcut">Shift + Enter 换行</span></div>
     {isKibot && <p className="kibot-composer-note">历史保留，摘要仅折叠展示。</p>}
   </div>;
-  return <div className={'workspace-body' + (panelOpen ? ' with-panel' : '') + (isKibot ? ' kibot-workspace' : '') + (historySummary ? ' kibot-history-open' : '')}>
-    <section className={'chat-panel' + (emptyConversation ? ' chat-panel-empty' : '')} inert={!!historySummary && historyOverlay || undefined}>
-      <header className={'workspace-header' + (project ? '' : ' workspace-header-chat') + (isKibot ? ' kibot-header' : '')}>
-        {isKibot ? <><div className="kibot-heading"><div><h1>kibot</h1><span className="kibot-badge">主会话</span></div><p>所有安排，从这里开始</p></div><span className="kibot-organized" title={`按 ${timeline.timeZone} 整理`}><Icon name="clock" size={16} />按时间整理</span></> : <div className="breadcrumb"><span>{project?.name || 'kivo'}</span><Icon name="chevron" size={14} /><strong>{title || '新的对话'}</strong></div>}
+  return <div ref={workspaceElement} className={'workspace-body' + (panelOpen ? ' with-panel' : '') + (isKibot ? ' kibot-workspace' : '') + (historySummary ? ' kibot-history-open' : '')}>
+    <section className={'chat-panel' + (emptyConversation ? ' chat-panel-empty' : '')} aria-label={isKibot ? 'kibot 主会话' : undefined} inert={!!historySummary && historyOverlay || undefined}>
+      {!isKibot && <header className={'workspace-header' + (project ? '' : ' workspace-header-chat')}>
+        <div className="breadcrumb"><span>{project?.name || 'kivo'}</span><Icon name="chevron" size={14} /><strong>{title || '新的对话'}</strong></div>
         {project && <><div className="workspace-mode-switch" role="group" aria-label="界面模式"><button className={!panelOpen ? 'selected' : ''} aria-pressed={!panelOpen} onClick={() => void changePanel(false)}><Icon name="chat" size={15} />聊天</button><button className={panelOpen ? 'selected' : ''} aria-pressed={panelOpen} onClick={() => void changePanel(true)}><Icon name="code" size={16} />工作</button></div>
         <div className="workspace-header-actions">
           <button className={'button small-button file-panel-toggle' + (panelOpen ? ' subtle active' : ' secondary')} onClick={() => void changePanel(!panelOpen)} title="项目文件与代码差异" aria-expanded={panelOpen}><Icon name="panel" size={16} /><span>文件与差异</span></button>
           {project.id === conversationProject?.id && <div className="menu-anchor"><button className="icon-button" aria-label="项目操作" aria-expanded={projectMenu} onClick={() => setProjectMenu(!projectMenu)}><Icon name="more" /></button>{projectMenu && <><button className="menu-dismiss" aria-label="关闭项目菜单" onClick={() => setProjectMenu(false)} /><div className="dropdown-menu"><button onClick={() => { setProjectMenu(false); onRenameProject(); }}><Icon name="edit" size={16} />重命名项目</button><button className="danger-text" disabled={running} onClick={() => { setProjectMenu(false); onDeleteProject(); }}><Icon name="trash" size={16} />删除项目</button></div></>}</div>}
         </div></>}
-      </header>
+      </header>}
       {!isKibot && <WorkContext snapshot={work} selection={workSelection} onChange={selection => void changeWorkSelection(selection)} route={workRoute} onRoute={setWorkRoute} threadId={threadId} draft={input} busy={composerBusy || voiceBusy}
         loadError={workError} onRefresh={() => void refreshWork()} />}
       {taskUnavailable && <div className="provider-banner"><Icon name="info" size={16} /><span>{work ? '当前工作模式只允许查看任务记录，暂不能继续执行此任务。' : '正在核对任务的执行范围…'}</span></div>}

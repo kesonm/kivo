@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './App';
 import { DialogProvider, NoticeProvider } from './ui';
+import { PointerEffect } from './PointerEffect';
 import './styles.css';
 import './kibot.css';
 
@@ -13,4 +14,4 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { fai
     return this.props.children;
   }
 }
-ReactDOM.createRoot(document.getElementById('root')!).render(<ErrorBoundary><NoticeProvider><DialogProvider><App /></DialogProvider></NoticeProvider></ErrorBoundary>);
+ReactDOM.createRoot(document.getElementById('root')!).render(<ErrorBoundary><NoticeProvider><DialogProvider><App /><PointerEffect /></DialogProvider></NoticeProvider></ErrorBoundary>);

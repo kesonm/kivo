@@ -8,7 +8,9 @@ import { LocalDevices, LocalProjectDialog } from './Local';
 import { Brand, Icon } from './icons';
 import { getDirtyFile } from './navigation';
 import { ErrorBox, Loading, Modal, useDialog, useNotice } from './ui';
+import { useSidebarLayout } from './useSidebarLayout';
 import type { Project, Session, Thread, User, WorkSnapshot, WorkTask } from './types';
+import './sidebar-layout.css';
 
 type View = 'workspace' | 'account' | 'admin' | 'local';
 export function App() {
@@ -25,12 +27,17 @@ export function App() {
   const [chatsError, setChatsError] = useState('');
   const [threadId, setThreadId] = useState<string | null>(null);
   const [threadsRevision, setThreadsRevision] = useState(0);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   const sidebarRef = useRef<HTMLElement>(null);
   const sidebarOpenButton = useRef<HTMLButtonElement | null>(null);
   const sidebarCloseButton = useRef<HTMLButtonElement>(null);
+  const sidebarFocusWithin = useRef(false);
+  const navigationTrigger = useRef<HTMLElement | null>(null);
+  const restoreSidebarFocus = useCallback(() => {
+    window.requestAnimationFrame(() => sidebarOpenButton.current?.focus());
+  }, []);
+  const sidebarLayout = useSidebarLayout(restoreSidebarFocus);
+  const { mobile, setSidebarOpen, overlayMode, docked, drawerOpen, visible: sidebarVisible } = sidebarLayout;
   const [navigationPanel, setNavigationPanel] = useState<'history' | 'new' | 'account' | null>(null);
-  const [mobile, setMobile] = useState(() => window.matchMedia('(max-width: 800px)').matches);
   const [primary, setPrimary] = useState<{ userId: string; thread: Thread } | null>(null);
   const [primaryLoading, setPrimaryLoading] = useState(true);
   const [primaryError, setPrimaryError] = useState('');
@@ -80,13 +87,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const media = window.matchMedia('(max-width: 800px)');
-    const changed = () => { setMobile(media.matches); if (!media.matches) setSidebarOpen(false); };
-    media.addEventListener('change', changed);
-    return () => media.removeEventListener('change', changed);
-  }, []);
-  useEffect(() => {
-    if (!sidebarOpen || !mobile || !user) return;
+    if (!drawerOpen || !user) return;
     const previous = sidebarOpenButton.current;
     const timer = window.setTimeout(() => sidebarCloseButton.current?.focus(), 0);
     const keydown = (event: KeyboardEvent) => {
@@ -105,18 +106,30 @@ export function App() {
       clearTimeout(timer); document.removeEventListener('keydown', keydown);
       window.requestAnimationFrame(() => { if (!document.querySelector('[role="dialog"][aria-modal="true"]')) previous?.focus(); });
     };
-  }, [sidebarOpen, mobile, user?.id]);
+  }, [drawerOpen, user?.id]);
+
+  useEffect(() => {
+    if (sidebarVisible || !sidebarFocusWithin.current) return;
+    sidebarFocusWithin.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      if (!document.querySelector('[role="dialog"][aria-modal="true"]')) sidebarOpenButton.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [sidebarVisible]);
 
   useEffect(() => {
     const hasOverlay = navigationPanel !== null || localDialog !== null;
     const hadOverlay = previousNavigationOverlay.current;
     previousNavigationOverlay.current = hasOverlay;
-    if (!hadOverlay || hasOverlay || !mobile) return;
+    if (!hadOverlay || hasOverlay) return;
     const frame = window.requestAnimationFrame(() => {
-      if (!document.querySelector('[role="dialog"][aria-modal="true"]')) sidebarOpenButton.current?.focus();
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      const trigger = navigationTrigger.current;
+      if (trigger?.isConnected && trigger.getClientRects().length && !trigger.closest('[inert]')) trigger.focus();
+      else sidebarOpenButton.current?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [navigationPanel, localDialog, mobile]);
+  }, [navigationPanel, localDialog]);
 
   const refreshSession = useCallback(async (expectedUserId?: string) => {
     const requestUser = expectedUserId ?? activeLocation.current.userId;
@@ -289,9 +302,17 @@ export function App() {
     finally { if (isCurrentUser()) setOpeningTask(old => old === task.id ? null : old); }
   }
   function openNavigation(panel: 'history' | 'new' | 'account') {
+    navigationTrigger.current = document.activeElement as HTMLElement | null;
     setNavigationPanel(panel); setSidebarOpen(false);
     if (panel === 'new') void loadProjects();
     if (panel === 'history') setHistorySearch('');
+  }
+  function openSidebar() {
+    if (overlayMode) setSidebarOpen(true);
+    else {
+      sidebarLayout.expand();
+      window.requestAnimationFrame(() => sidebarCloseButton.current?.focus());
+    }
   }
   const taskLabels: Record<string, string> = { running: '执行中', waiting_input: '待确认', waiting_approval: '待审批', succeeded: '已完成', failed: '失败', cancelled: '已取消', needs_reconciliation: '待核对', ready: '待执行', paused: '已暂停' };
   const recentTasks = (workSnapshot?.tasks ?? []).slice(0, 12);
@@ -300,12 +321,14 @@ export function App() {
   if (error && !session) return <div className="boot-screen"><Brand /><ErrorBox error={error} onRetry={() => void initialize()} /></div>;
   if (!user) return <Auth onLogin={nextUser => void onLogin(nextUser)} />;
   return <>
-    <div className="app-shell kibot-shell" inert={navigationPanel !== null || localDialog !== null || undefined}>
-      {mobile && sidebarOpen && <button className="sidebar-backdrop" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} />}
-      <aside ref={sidebarRef} id="primary-navigation" className={'kibot-sidebar' + (sidebarOpen ? ' kibot-sidebar-open' : '')}
-        role={mobile && sidebarOpen ? 'dialog' : undefined} aria-modal={mobile && sidebarOpen ? true : undefined} aria-label="主导航"
-        inert={mobile && !sidebarOpen || undefined} tabIndex={-1}>
-        <div className="kibot-nav-brand"><Brand /><button ref={sidebarCloseButton} className="icon-button nav-mobile-close" aria-label="关闭导航" onClick={() => setSidebarOpen(false)}><Icon name="close" /></button></div>
+    <div className={'app-shell kibot-shell nav-layout ' + (docked ? 'nav-docked' : 'nav-collapsed') + (overlayMode ? ' nav-overlay-mode' : '') + (mobile ? ' nav-mobile' : '') + (drawerOpen ? ' nav-drawer-open' : '') + (sidebarLayout.resizing ? ' nav-resizing' : '') + (sidebarLayout.collapseReady ? ' nav-collapse-ready' : '')}
+      style={sidebarLayout.style} inert={navigationPanel !== null || localDialog !== null || undefined}>
+      {drawerOpen && <button className="sidebar-backdrop" tabIndex={-1} aria-label="关闭导航" onClick={() => setSidebarOpen(false)} />}
+      <aside ref={sidebarRef} id="primary-navigation" className={'kibot-sidebar' + (drawerOpen ? ' kibot-sidebar-open' : '')}
+        role={drawerOpen ? 'dialog' : undefined} aria-modal={drawerOpen ? true : undefined} aria-label="主导航"
+        inert={!sidebarVisible || undefined} tabIndex={-1}
+        onFocusCapture={() => { sidebarFocusWithin.current = true; }} onBlurCapture={event => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) sidebarFocusWithin.current = false; }}>
+        <div className="kibot-nav-brand"><Brand /><button ref={sidebarCloseButton} className="icon-button nav-collapse-control" aria-label={overlayMode ? '关闭导航' : '收起侧栏'} title={overlayMode ? '关闭导航' : '收起侧栏'} onClick={() => overlayMode ? setSidebarOpen(false) : sidebarLayout.collapse()}><Icon name={overlayMode ? 'close' : 'panel'} size={18} /></button></div>
         <button className={'kibot-primary-link' + (view === 'workspace' && isKibot ? ' selected' : '')} aria-current={view === 'workspace' && isKibot ? 'page' : undefined}
           disabled={!primaryThread} onClick={() => primaryThread && void selectThread(primaryThread)}><Icon name="spark" size={24} /><span><strong>kibot</strong><small>你的主对话</small></span></button>
         {primaryError && <ErrorBox error={primaryError} onRetry={() => setPrimaryRetry(value => value + 1)} />}
@@ -328,9 +351,10 @@ export function App() {
           {(recentThreads.length > 8 || (workSnapshot?.tasks.length ?? 0) > 12) && <button className="nav-action nav-more" onClick={() => openNavigation('history')}>查看历史对话<Icon name="arrow" size={15} /></button>}
         </div>
         <div className="nav-bottom"><button className="nav-profile" onClick={() => openNavigation('account')} aria-label="个人设置"><span className="sidebar-avatar">{(user.displayName || user.username).slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName || user.username}</strong><small>个人设置</small></span><Icon name="settings" size={18} /></button></div>
+        {docked && <div className="nav-resize-handle" {...sidebarLayout.separatorProps}><span className="nav-resize-hint" aria-hidden="true">{sidebarLayout.collapseReady ? '松开收起侧栏' : '拖动调整宽度'}</span></div>}
       </aside>
-      <div className="main-shell" inert={mobile && sidebarOpen || undefined}>
-        <header className="kibot-mobile-topbar"><button ref={sidebarOpenButton} className="icon-button" aria-label="打开导航" aria-expanded={sidebarOpen} aria-controls="primary-navigation" onClick={() => setSidebarOpen(true)}><Icon name="menu" /></button><Brand small /><button className="icon-button" aria-label="新建任务" onClick={() => openNavigation('new')}><Icon name="plus" /></button></header>
+      <div className="main-shell" inert={drawerOpen || undefined}>
+        {!docked && <button ref={sidebarOpenButton} className="icon-button nav-launcher" aria-label="打开导航" title="展开侧栏" aria-expanded={drawerOpen} aria-controls="primary-navigation" onClick={openSidebar}><Icon name="panel" size={19} /></button>}
         {view === 'workspace' ? (primaryLoading || (!primaryThread && !primaryError)) && !threadId ? <div className="boot-screen"><Loading label="正在打开 kibot…" /></div>
           : primaryError && !threadId ? <div className="boot-screen"><ErrorBox error={primaryError} onRetry={() => setPrimaryRetry(value => value + 1)} /></div>
           : <Workspace key={user.id + ':' + (projectId || 'chat') + ':' + workspaceVersion} project={selectedProject} threadId={threadId} isKibot={isKibot} initialTask={initialTask}
@@ -339,6 +363,7 @@ export function App() {
             onOpenLocal={async () => { if (await confirmNavigation()) setLocalDialog('open'); }} />
           : view === 'local' ? <LocalDevices /> : view === 'admin' && user.role === 'admin' ? <Admin currentUser={user} onModelsSaved={() => void refreshSession(user.id).catch(() => undefined)} /> : <Account user={user} refreshSession={refreshSession} />}
       </div>
+      {!sidebarVisible && <div className="nav-floating-account"><button type="button" className="nav-floating-avatar" aria-label="个人设置" aria-describedby="nav-account-tooltip" onClick={() => openNavigation('account')}><span className="sidebar-avatar">{(user.displayName || user.username).slice(0, 1).toUpperCase()}</span></button><span id="nav-account-tooltip" role="tooltip">{user.displayName || user.username}</span></div>}
     </div>
     {navigationPanel === 'history' && <Modal title="搜索历史" description="按标题查找独立对话；kibot 的历史记录在主会话摘要中查看。" onClose={() => setNavigationPanel(null)}>
       <div className="nav-search-field"><Icon name="search" /><input autoFocus aria-label="搜索历史对话" placeholder="搜索对话标题" value={historySearch} onChange={event => setHistorySearch(event.target.value)} /></div>

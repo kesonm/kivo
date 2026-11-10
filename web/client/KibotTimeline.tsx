@@ -150,14 +150,20 @@ export function KibotSummaryList({ timeline, selectedId, onOpen, onBeforeLoadMor
   </div>;
 }
 
-export function useHistoryOverlay() {
-  const [overlay, setOverlay] = useState(() => window.matchMedia('(max-width: 1100px)').matches);
+export function useHistoryOverlay(workspace: RefObject<HTMLDivElement | null>) {
+  const [overlay, setOverlay] = useState(true);
   useEffect(() => {
-    const media = window.matchMedia('(max-width: 1100px)');
-    const change = () => setOverlay(media.matches);
-    media.addEventListener('change', change);
-    return () => media.removeEventListener('change', change);
-  }, []);
+    const element = workspace.current;
+    if (!element) return;
+    // The sidebar is resizable, so viewport breakpoints alone cannot tell
+    // whether the conversation still has room for a side-by-side reader.
+    const change = () => setOverlay(element.getBoundingClientRect().width < 920);
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(change);
+    change();
+    observer?.observe(element);
+    window.addEventListener('resize', change);
+    return () => { observer?.disconnect(); window.removeEventListener('resize', change); };
+  }, [workspace]);
   return overlay;
 }
 
@@ -226,7 +232,7 @@ export function KibotHistoryPanel({ summary, timeZone, user, overlay, onClose, r
   const title = `${Number(summary.date.slice(5, 7))}月${Number(summary.date.slice(8, 10))}日 · ${summary.kind === 'day' ? '全天记录' : '对话记录'}`;
   return <>
     {overlay && <button type="button" className="kibot-history-backdrop" tabIndex={-1} aria-label="关闭历史详情" onClick={onClose} />}
-    <aside ref={panel} className="kibot-history-panel" id="kibot-history-panel" role="dialog" aria-modal={overlay || undefined} aria-labelledby="kibot-history-title" tabIndex={-1}>
+    <aside ref={panel} className={'kibot-history-panel' + (overlay ? ' kibot-history-overlay' : '')} id="kibot-history-panel" role="dialog" aria-modal={overlay || undefined} aria-labelledby="kibot-history-title" tabIndex={-1}>
       <header className="kibot-history-header"><div><h2 id="kibot-history-title">{title}</h2><p className="kibot-history-subtitle">kibot · {summary.segmentCount} 段对话 · {total} 条消息</p></div><button ref={close} type="button" className="icon-button" aria-label="关闭历史详情" onClick={onClose}><Icon name="close" size={20} /></button></header>
       <p className="kibot-history-note">完整原始记录 · 只读</p>
       <div className="kibot-history-scroll">

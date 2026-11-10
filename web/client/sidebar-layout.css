@@ -1,0 +1,91 @@
+/* These selectors intentionally outrank the legacy viewport sidebar rules. */
+.kibot-shell.nav-layout > .kibot-sidebar {
+  position: relative; inset: auto; display: flex; flex: 0 0 var(--nav-width);
+  width: var(--nav-width); max-width: none; min-width: 0;
+  transform: none; visibility: visible; transition: none;
+  padding-left: 14px; padding-right: 14px; background: #fff; z-index: 35;
+}
+.kibot-shell.nav-layout.nav-collapsed > .kibot-sidebar { display: none; }
+.kibot-shell.nav-layout.nav-overlay-mode.nav-drawer-open > .kibot-sidebar {
+  display: flex; position: fixed; inset: 0 auto 0 0; width: var(--nav-width);
+  max-width: calc(100vw - 32px); z-index: 82; box-shadow: 12px 0 40px #00000012;
+}
+.kibot-shell.nav-layout > .sidebar-backdrop {
+  display: block; position: fixed; inset: 0; z-index: 81; background: #00000030;
+}
+.kibot-shell.nav-layout .kibot-nav-brand { margin-left: 8px; margin-right: 0; gap: 8px; }
+.kibot-shell.nav-layout .kibot-nav-brand > .nav-collapse-control {
+  display: inline-flex; width: 32px; min-width: 32px; height: 32px; min-height: 32px;
+  flex: 0 0 32px; border-radius: 8px; color: #777;
+}
+.kibot-shell.nav-layout .nav-collapse-control:hover { color: #333; background: #f5f5f5; }
+.kibot-shell.nav-layout .nav-profile > span:nth-child(2) { min-width: 0; }
+.kibot-shell.nav-layout .nav-profile strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.kibot-shell.nav-layout .nav-resize-handle {
+  position: absolute; inset: 0 -5px 0 auto; width: 10px; z-index: 46;
+  cursor: col-resize; touch-action: none; outline: none;
+}
+.kibot-shell.nav-layout .nav-resize-handle::after {
+  content: ''; position: absolute; top: 0; bottom: 0; left: 4px; width: 2px;
+  background: transparent; transition: background .12s;
+}
+.kibot-shell.nav-layout .nav-resize-handle:hover::after,
+.kibot-shell.nav-layout .nav-resize-handle:focus-visible::after,
+.kibot-shell.nav-layout.nav-resizing .nav-resize-handle::after { background: #aaa; }
+.kibot-shell.nav-layout.nav-collapse-ready .nav-resize-handle::after { background: #d92029; }
+.kibot-shell.nav-layout .nav-resize-handle:focus-visible { outline: 2px solid #777; outline-offset: -3px; }
+.kibot-shell.nav-layout .nav-resize-hint {
+  position: absolute; top: 12px; right: 14px; border: 1px solid #e5e5e5; background: #fff;
+  color: #666; font-size: 11px; white-space: nowrap; border-radius: 7px; padding: 7px 10px;
+  box-shadow: 0 3px 14px #0000000a; pointer-events: none; opacity: 0;
+}
+.kibot-shell.nav-layout .nav-resize-handle:focus-visible .nav-resize-hint,
+.kibot-shell.nav-layout.nav-resizing .nav-resize-hint { opacity: 1; }
+.kibot-shell.nav-layout.nav-resizing, .kibot-shell.nav-layout.nav-resizing * { user-select: none; cursor: col-resize; }
+
+.kibot-shell.nav-layout .nav-launcher {
+  position: absolute; top: 12px; left: 12px; z-index: 45; width: 36px; min-width: 36px;
+  height: 36px; min-height: 36px; border-radius: 9px; color: #777; background: #fff;
+}
+.kibot-shell.nav-layout .nav-launcher:hover { color: #222; background: #f5f5f5; }
+.kibot-shell.nav-layout.nav-collapsed .workspace-header { padding-left: 68px; }
+.kibot-shell.nav-layout.nav-collapsed .dashboard-content { padding-left: 68px; }
+.kibot-shell.nav-layout .nav-floating-account {
+  position: fixed; left: 16px; bottom: 16px; z-index: 45;
+}
+.kibot-shell.nav-layout .nav-floating-avatar {
+  display: flex; align-items: center; justify-content: center; width: 40px; height: 40px;
+  padding: 0; border: 1px solid #e3e3e3; border-radius: 12px; color: #555; background: #fff;
+  box-shadow: 0 2px 8px #00000005;
+}
+.kibot-shell.nav-layout .nav-floating-avatar:hover { border-color: #bbb; background: #fafafa; }
+.kibot-shell.nav-layout .nav-floating-avatar:focus-visible,
+.kibot-shell.nav-layout .nav-launcher:focus-visible { outline: 2px solid #777; outline-offset: 3px; }
+.kibot-shell.nav-layout .nav-floating-avatar .sidebar-avatar {
+  display: flex; align-items: center; justify-content: center; width: 28px; height: 28px;
+  border-radius: 8px; color: #555; background: #fff; font-size: 13px;
+}
+.kibot-shell.nav-layout .nav-floating-account [role='tooltip'] {
+  position: absolute; left: 0; bottom: calc(100% + 8px); max-width: min(240px, calc(100vw - 32px));
+  width: max-content; padding: 8px 11px; border: 1px solid #e5e5e5; border-radius: 8px;
+  background: #fff; color: #555; box-shadow: 0 3px 15px #0000000d; font-size: 12px;
+  line-height: 1.5; overflow-wrap: anywhere; visibility: hidden; opacity: 0; pointer-events: none;
+}
+.kibot-shell.nav-layout .nav-floating-account:hover [role='tooltip'],
+.kibot-shell.nav-layout .nav-floating-account:focus-within [role='tooltip'] { visibility: visible; opacity: 1; }
+
+@media (max-width: 1000px) {
+  /* Separate small-screen controls from the scroll area and composer. */
+  .kibot-shell.nav-layout.nav-collapsed > .main-shell {
+    padding-top: max(56px, calc(44px + env(safe-area-inset-top)));
+    padding-bottom: calc(56px + env(safe-area-inset-bottom));
+  }
+  .kibot-shell.nav-layout .nav-launcher { top: max(10px, env(safe-area-inset-top)); }
+  .kibot-shell.nav-layout .nav-floating-account { left: 12px; bottom: calc(8px + env(safe-area-inset-bottom)); }
+  .kibot-shell.nav-layout.nav-collapsed .workspace-header { padding-left: 22px; }
+  .kibot-shell.nav-layout.nav-collapsed .dashboard-content { padding-left: 22px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kibot-shell.nav-layout .nav-resize-handle::after { transition: none; }
+}

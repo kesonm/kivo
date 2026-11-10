@@ -9,6 +9,15 @@ import { createStore } from '../server/store.mjs';
 import { createRuntime } from '../server/runtime.mjs';
 import { createKibot } from '../server/kibot.mjs';
 import { createWorkStore } from '../server/work-store.mjs';
+import { verifyNavigationAndPointer } from './ui-interaction-checks.mjs';
+
+// Keep the fixture's day/idle boundaries deterministic, even when QA runs at midnight.
+const NativeDate = Date;
+const fixtureOffset = NativeDate.parse('2026-11-10T15:00:00+08:00') - NativeDate.now();
+globalThis.Date = class extends NativeDate {
+  constructor(...args) { super(...(args.length ? args : [NativeDate.now() + fixtureOffset])); }
+  static now() { return NativeDate.now() + fixtureOffset; }
+};
 
 const { chromium } = await import(process.env.QA_PLAYWRIGHT_MODULE || '/qa/node_modules/playwright-core/index.mjs');
 const output = process.env.QA_OUTPUT_DIR || '/out';
@@ -74,6 +83,7 @@ try {
   assert.equal(await page.locator('.kibot-summary-card').count(), 2);
   assert.equal(await page.locator('.messages-list .user-message-content').count(), 0, 'Old primary messages should be folded');
   assert.equal(await page.locator('.kibot-history-panel').count(), 0);
+  await verifyNavigationAndPointer(page, context, output);
   await page.screenshot({ path: `${output}/kibot-desktop.png`, fullPage: true });
   await page.locator('.kibot-summary-card').filter({ hasText: '查看全天记录' }).click();
   await page.locator('.kibot-history-message').first().waitFor();
@@ -106,6 +116,9 @@ try {
   assert.equal(store.db.prepare('SELECT count(*) n FROM kibot_threads WHERE user_id=?').get(user.id).n, 1);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForFunction(() => document.querySelector('.kibot-sidebar')?.inert);
+  const compactAvatar = await page.getByRole('button', { name: '个人设置', exact: true }).boundingBox();
+  const compactComposer = await page.locator('form.composer').boundingBox();
+  assert.ok(compactAvatar && compactComposer && compactAvatar.y >= compactComposer.y + compactComposer.height, 'Mobile avatar must not cover the composer');
   await page.screenshot({ path: `${output}/kibot-mobile.png`, fullPage: true, animations: 'disabled' });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'No horizontal overflow');
   await page.getByRole('button', { name: '打开导航', exact: true }).click();
@@ -138,7 +151,7 @@ try {
   assert.equal(store.db.prepare('SELECT count(*) n FROM kibot_threads WHERE user_id=?').get(otherUser.id).n, 1);
   assert.equal(await page.locator('.kibot-summary-card').count(), 0, 'The new account starts with its own empty primary');
   assert.deepEqual(errors, [], 'Browser errors');
-  console.log(JSON.stringify({ ok: true, screenshots: 5, checks: ['login', 'primary identity', 'idle summaries', 'daily details', 'stacked dialogs', 'focus return', 'simulated stream', 'independent conversation isolation', 'explicit task selection', 'reload', 'mobile layout', 'mobile navigation', 'mobile history', 'short viewport', 'cross-tab account isolation'], paidCalls: 0 }));
+  console.log(JSON.stringify({ ok: true, screenshots: 8, checks: ['login', 'primary identity', 'idle summaries', 'daily details', 'stacked dialogs', 'focus return', 'simulated stream', 'independent conversation isolation', 'explicit task selection', 'reload', 'mobile layout and avatar clearance', 'mobile navigation', 'mobile history', 'short viewport', 'cross-tab account isolation'], paidCalls: 0 }));
 } finally {
   await browser.close();
   server.closeAllConnections();

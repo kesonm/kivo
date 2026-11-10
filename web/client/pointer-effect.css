@@ -1,0 +1,48 @@
+/* This layer never changes a control's box, cursor, focus ring or hit area. */
+.pointer-effect-layer, .pointer-effect-layer * { pointer-events: none !important; }
+.pointer-effect-layer { position: fixed; inset: 0; z-index: 10000; overflow: hidden; contain: strict; }
+.pointer-effect-layer[data-state="hidden"] { visibility: hidden; }
+.pointer-effect-halo {
+  position: absolute; left: 0; top: 0; width: 64px; height: 64px; margin: -32px 0 0 -32px;
+  border-radius: 50%; background: radial-gradient(circle, #d96d781c 0%, #85858d0e 35%, transparent 72%);
+  opacity: .42; transition: opacity 120ms; will-change: transform;
+}
+.pointer-effect-layer[data-state="near"] .pointer-effect-halo { opacity: .85; }
+.pointer-effect-layer[data-state="hover"] .pointer-effect-halo { opacity: .23; }
+.pointer-effect-frame {
+  position: absolute; left: 0; top: 0; box-sizing: border-box; overflow: visible;
+  border: 1px solid transparent; opacity: 0; background: transparent;
+  will-change: transform; transition: opacity 100ms;
+}
+.pointer-effect-layer[data-state="hover"] .pointer-effect-frame { opacity: 1; border-color: #c4687259; }
+.pointer-effect-layer[data-state="near"] .pointer-effect-frame { opacity: 1; border-color: transparent; }
+.pointer-effect-inner {
+  position: absolute; inset: 0; border-radius: inherit; opacity: 0;
+  background: radial-gradient(105px circle at var(--pointer-local-x) var(--pointer-local-y), #d96d7820, #9997a010 35%, transparent 75%);
+}
+.pointer-effect-layer[data-state="hover"] .pointer-effect-inner { opacity: 1; }
+.pointer-effect-local-edge {
+  position: absolute; inset: -1px; box-sizing: border-box; border: 2px solid #c46c7890; border-radius: inherit;
+  opacity: 0; filter: blur(2px);
+  /* The near state reveals at most a tiny edge patch, never the full perimeter. */
+  mask-image: radial-gradient(circle var(--pointer-edge-radius) at var(--pointer-edge-x) var(--pointer-edge-y), #000 0%, transparent 100%);
+  -webkit-mask-image: radial-gradient(circle var(--pointer-edge-radius) at var(--pointer-edge-x) var(--pointer-edge-y), #000 0%, transparent 100%);
+}
+.pointer-effect-layer[data-state="near"] .pointer-effect-local-edge { opacity: .6; }
+.pointer-effect-near-specks { position: absolute; left: 0; top: 0; opacity: 0; }
+.pointer-effect-layer[data-state="near"] .pointer-effect-near-specks { opacity: .5; }
+.pointer-effect-near-specks i { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #8b8c93; box-shadow: 0 0 4px #c87b8544; }
+.pointer-effect-near-specks i:nth-child(1) { left: -12px; top: -5px; opacity: .65; }
+.pointer-effect-near-specks i:nth-child(2) { left: 9px; top: -11px; opacity: .4; }
+.pointer-effect-near-specks i:nth-child(3) { left: 8px; top: 12px; opacity: .7; }
+.pointer-effect-particle {
+  position: absolute; width: var(--particle-size, 2px); height: var(--particle-size, 2px);
+  border-radius: 50%; background: #be737e; animation: pointer-particle-out 580ms ease-out both;
+}
+@keyframes pointer-particle-out {
+  0% { transform: translate(-50%, -50%) scale(.75); opacity: .7; }
+  100% { transform: translate(calc(-50% + var(--particle-x)), calc(-50% + var(--particle-y))) scale(.15); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce), (hover: none), (pointer: coarse) {
+  .pointer-effect-layer { display: none !important; }
+}
