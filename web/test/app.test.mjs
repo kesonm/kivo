@@ -122,7 +122,7 @@ test('cloud timeline survives restart and resume links one new run using the cur
   assert.equal((await alice.request('POST',`/api/threads/${ordinary.id}/turns`,{text:'Hello',verificationCommand:'npm test'})).status,400);
 });
 
-test('administration is read-only and old mutation endpoints do not exist',async t=>{
+test('administrator user records are read-only and old mutation endpoints do not exist',async t=>{
   const {client,store}=await fixture(t);const c=await client(),admin=await client();const user=await register(c,'alice');await loginAdmin(admin);
   for(const [method,url,body]of [
     ['POST',`/api/admin/users/${user.id}/quota`,{deltaTokens:10000,note:'old API'}],
@@ -131,6 +131,50 @@ test('administration is read-only and old mutation endpoints do not exist',async
   ])assert.equal((await admin.request(method,url,body)).status,404);
   assert.equal(store.getUser(user.id).disabled,false);
   for(const url of ['/api/admin/users','/api/admin/usage','/api/admin/threads','/api/admin/overview','/api/admin/audit'])assert.equal((await c.request('GET',url)).status,403);
+});
+
+test('administrators configure chat models and the server enforces their enabled models and effort choices', async t => {
+  const { client, store, startCalls } = await fixture(t);
+  const member = await client(), administrator = await client();
+  const user = await register(member, 'alice');
+  await loginAdmin(administrator);
+  await member.request('PUT', '/api/account/api-key', { apiKey: keyA });
+  const settings = (await administrator.request('GET', '/api/admin/models')).data;
+  assert.deepEqual(settings.knownEfforts['gpt-6-sol'], ['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+  assert.equal((await member.request('GET', '/api/admin/models')).status, 403);
+  assert.equal((await member.request('PUT', '/api/admin/models', settings)).status, 403);
+  assert.equal((await administrator.request('PUT', '/api/admin/models', settings, { 'X-CSRF-Token': '' })).status, 403);
+  const impossible = structuredClone(settings);
+  Object.assign(impossible.models.find(model => model.id === 'gpt-6.1-sol'), { efforts: ['none'], defaultEffort: 'none' });
+  assert.equal((await administrator.request('PUT', '/api/admin/models', impossible)).status, 400);
+
+  const changed = structuredClone(settings);
+  changed.defaultModel = 'gpt-6-luna';
+  Object.assign(changed.models.find(model => model.id === 'gpt-6-luna'), { efforts: ['none', 'high'], defaultEffort: 'high' });
+  changed.models.find(model => model.id === 'gpt-6-astra').enabled = false;
+  changed.models.push({ id: 'gpt-6-sol', label: 'Sol 配置项', description: '', enabled: true, efforts: ['medium'], defaultEffort: 'medium' });
+  const saved = await administrator.request('PUT', '/api/admin/models', changed);
+  assert.equal(saved.status, 200);
+  assert.equal(saved.data.revision, settings.revision + 1);
+  assert.equal((await administrator.request('PUT', '/api/admin/models', changed)).data.code, 'chat_catalog_conflict');
+  assert.ok(store.getAudit().some(entry => entry.action === 'admin.chat_models.updated'));
+
+  const session = (await member.request('GET', '/api/session')).data;
+  assert.equal(session.model, 'model');
+  assert.equal(session.defaultChatModel, 'gpt-6-luna');
+  assert.deepEqual(session.chatModels.find(model => model.id === 'gpt-6-luna').efforts, ['none', 'high']);
+  assert.ok(session.chatModels.some(model => model.label === 'Sol 配置项'));
+  assert.ok(!session.chatModels.some(model => model.id === 'gpt-6-astra'));
+  const thread = (await member.request('POST', '/api/threads', {})).data.thread;
+  const turn = `/api/threads/${thread.id}/turns`;
+  assert.equal((await member.request('POST', turn, { text: 'test', model: 'gpt-6-astra' })).data.code, 'chat_model_invalid');
+  assert.equal((await member.request('POST', turn, { text: 'test', reasoningEffort: 'low' })).data.code, 'chat_reasoning_invalid');
+  assert.equal(store.getActiveRunsForUser(user.id).length, 0);
+  assert.equal((await member.request('POST', turn, { text: 'Legacy client without model or effort' })).status, 202);
+  assert.equal(startCalls[0].model, 'gpt-6-luna');
+  assert.equal(startCalls[0].reasoningEffort, 'high');
+  const project = await projectThread(member);
+  assert.equal((await member.request('POST', `/api/threads/${project.thread.id}/turns`, { text: 'test', reasoningEffort: 'high' })).status, 400);
 });
 
 test('a personal key allows zero-legacy-balance tasks, while old quota never substitutes for a key',async t=>{

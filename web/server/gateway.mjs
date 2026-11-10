@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { isChatModel } from './chat-models.mjs';
+import { resolveChatSelection } from './chat-models.mjs';
 
 const OPENAI_ORIGIN = 'https://api.openai.com/v1';
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -248,15 +248,18 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
   const activeRequests = new Set();
   let server, listening;
 
-  function authorizeRun({ id, userId, chatTools, chatFiles = [], chatModel }) {
+  function authorizeRun({ id, userId, chatTools, chatFiles = [], chatModel, reasoningEffort }) {
     if (chatTools !== undefined && (!Array.isArray(chatTools) || chatTools.some(type => !CHAT_TOOLS.has(type)))) {
       throw new GatewayError('无效的聊天工具权限。');
     }
     const files = validateChatFiles(chatFiles);
     if (files.length && !chatTools?.includes('code_interpreter')) throw new GatewayError('未启用文件分析工具。');
-    if (chatModel !== undefined && (!chatTools || !isChatModel(chatModel, config.model))) throw new GatewayError('该模型不可用于此任务。');
+    if (!chatTools && (chatModel !== undefined || reasoningEffort !== undefined)) throw new GatewayError('该聊天配置不可用于项目任务。');
+    const selection = chatTools
+      ? resolveChatSelection(store.getChatModelCatalog(config.model), chatModel, reasoningEffort)
+      : { model: config.model };
     const token = randomBytes(32).toString('base64url');
-    capabilities.set(token, { runId: id, userId, model: chatModel ?? config.model, chatTools: chatTools && new Set(chatTools), chatFiles: files, expires: Date.now() + (config.runTimeoutMs || 20 * 60_000) + 60_000, inFlight: false, requestCount: 0, controllers: new Set(), tasks: new Set() });
+    capabilities.set(token, { runId: id, userId, ...selection, chatTools: chatTools && new Set(chatTools), chatFiles: files, expires: Date.now() + (config.runTimeoutMs || 20 * 60_000) + 60_000, inFlight: false, requestCount: 0, controllers: new Set(), tasks: new Set() });
     return token;
   }
 
@@ -332,7 +335,10 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       const body = await readJson(req, cap.chatTools ? CHAT_GATEWAY_MAX_REQUEST_BYTES : MAX_REQUEST_BYTES);
       const payload = prepareResponseRequest(body, config, cap.chatTools);
       payload.model = cap.model;
-      if (cap.chatTools) payload.safety_identifier = createHash('sha256').update(`kivo-user:${cap.userId}`).digest('hex');
+      if (cap.chatTools) {
+        if (cap.reasoningEffort !== undefined) payload.reasoning = { effort: cap.reasoningEffort };
+        payload.safety_identifier = createHash('sha256').update(`kivo-user:${cap.userId}`).digest('hex');
+      }
       // Resolve credentials only from the capability-bound user. The runner
       // receives this capability, never a real key or a global fallback key.
       const currentUser = store.getUser(cap.userId);

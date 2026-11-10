@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { api, dateTime, enc, messageOf } from './api';
+import { api, ApiError, dateTime, enc, messageOf } from './api';
 import { ChatComposer } from './ChatComposer';
 import { AttachmentChips, ChatImages, Markdown } from './ChatContent';
 import { Icon, Logo } from './icons';
@@ -8,7 +8,7 @@ import { Files } from './Files';
 import { LocalApprovals } from './Local';
 import { PreviousTask, TaskActivity, VerificationCard, useRunActivity } from './RunActivity';
 import { ErrorBox, Loading, StatusBadge, useDialog, useNotice } from './ui';
-import type { ChatModelOption, ChatTool, Message, Project, Run, RunEvent, RunVerification, Thread, User } from './types';
+import type { ChatModelOption, ChatTool, Message, Project, ReasoningEffort, Run, RunEvent, RunVerification, Thread, User } from './types';
 
 const chatFileCount = 4;
 const chatFileBytes = 8 * 1024 * 1024;
@@ -23,9 +23,9 @@ const chatStarters = [
   { icon: 'edit', title: '润色文字', text: '我想润色一段文字。请先问我文字的用途和希望的语气。' },
 ];
 
-export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged, user, providerConfigured, model, chatModels, refreshSession, onRenameProject, onDeleteProject, onOpenAccount, onOpenLocal }: {
+export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged, user, providerConfigured, model, defaultChatModel, chatModels, refreshSession, onRenameProject, onDeleteProject, onOpenAccount, onOpenLocal }: {
   project: Project | null; threadId: string | null; onThreadCreated: (thread: Thread) => void; onThreadsChanged: () => void;
-  user: User; providerConfigured: boolean; model?: string; chatModels?: ChatModelOption[]; refreshSession: () => Promise<void>;
+  user: User; providerConfigured: boolean; model?: string; defaultChatModel?: string; chatModels?: ChatModelOption[]; refreshSession: () => Promise<void>;
   onRenameProject: () => void; onDeleteProject: () => void; onOpenAccount: () => void; onOpenLocal: () => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -39,6 +39,7 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const [verificationCommand, setVerificationCommand] = useState('');
   const [selectedTool, setSelectedTool] = useState<Exclude<ChatTool, 'analyze'>>('auto');
   const [selectedModel, setSelectedModel] = useState<string>();
+  const [modelEfforts, setModelEfforts] = useState<Partial<Record<string, ReasoningEffort>>>({});
   const [attachments, setAttachments] = useState<File[]>([]);
   const [error, setError] = useState('');
   const [connectionLost, setConnectionLost] = useState(false);
@@ -63,8 +64,14 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const resumable = cloudProject && run?.mode === 'cloud' && run.status === 'interrupted';
   const { events: activity, error: activityError, add: addActivity, refresh: refreshActivity } = useRunActivity(run?.mode ? run.id : undefined);
   const chatTool = attachments.length ? 'analyze' : selectedTool;
-  const modelOptions = chatModels ?? (model ? [{ id: model, label: model, description: '' }] : []);
-  const chatModel = modelOptions.some(option => option.id === selectedModel) ? selectedModel : modelOptions.find(option => option.id === model)?.id ?? modelOptions[0]?.id;
+  const modelOptions: ChatModelOption[] = chatModels ?? (model ? [{ id: model, label: model, description: '' }] : []);
+  const chatModel = modelOptions.find(option => option.id === selectedModel)
+    ?? modelOptions.find(option => option.id === (defaultChatModel ?? model)) ?? modelOptions[0];
+  const savedEffort = chatModel && modelEfforts[chatModel.id];
+  const reasoningEffort = savedEffort && chatModel?.efforts?.includes(savedEffort) ? savedEffort : chatModel?.defaultEffort ?? undefined;
+  function selectEffort(effort?: ReasoningEffort) {
+    if (chatModel) setModelEfforts(previous => ({ ...previous, [chatModel.id]: effort }));
+  }
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; ++loadSequence.current; };
@@ -174,14 +181,15 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
         onThreadCreated(created.thread);
       }
       const check = cloudProject ? verificationCommand.trim() : '';
-      let body: { text: string; tool?: ChatTool; model?: string; verificationCommand?: string } | FormData = project
+      let body: { text: string; tool?: ChatTool; model?: string; reasoningEffort?: ReasoningEffort; verificationCommand?: string } | FormData = project
         ? { text, ...(check ? { verificationCommand: check } : {}) }
-        : { text, tool: chatTool, model: chatModel };
+        : { text, tool: chatTool, model: chatModel?.id, reasoningEffort };
       if (hasFiles) {
         const form = new FormData();
         form.set('text', text);
         form.set('tool', 'analyze');
-        if (chatModel) form.set('model', chatModel);
+        if (chatModel) form.set('model', chatModel.id);
+        if (reasoningEffort) form.set('reasoningEffort', reasoningEffort);
         for (const file of attachments) form.append('files', file);
         body = form;
       }
@@ -191,7 +199,14 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       setInput(''); setVerificationOpen(false); setVerificationCommand('');
       setAttachments([]); setSelectedTool('auto'); setRun(result.run);
       await loadThread(id); void refreshSession().catch(() => undefined);
-    } catch (e) { if (mounted.current) setError(messageOf(e)); else onThreadsChanged(); }
+    } catch (e) {
+      if (mounted.current) {
+        setError(messageOf(e));
+        if (!project && e instanceof ApiError && (e.code === 'chat_model_invalid' || e.code === 'chat_reasoning_invalid')) {
+          void refreshSession().catch(() => undefined);
+        }
+      } else onThreadsChanged();
+    }
     finally { sendingRef.current = false; if (mounted.current) { setSending(false); textarea.current?.focus(); } }
   }
   async function interrupt() {
@@ -272,7 +287,8 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       </div>
     </form> : <ChatComposer draft={input} setDraft={setInput} textarea={textarea} attachments={attachments} onAttach={attachFiles}
       onRemove={index => setAttachments(files => files.filter((_, i) => i !== index))} tool={chatTool} onTool={setSelectedTool}
-      model={chatModel} models={modelOptions} onModel={setSelectedModel} threadId={threadId} providerConfigured={providerConfigured}
+      model={chatModel} models={modelOptions} onModel={setSelectedModel} effort={reasoningEffort} onEffort={selectEffort}
+      onOpenReasoning={() => void refreshSession().catch(() => undefined)} threadId={threadId} providerConfigured={providerConfigured}
       busy={composerBusy} running={running} sending={sending} stopping={stopping} onSend={send} onStop={() => void interrupt()} onOpenLocal={onOpenLocal} />}
     <div className="composer-footer">{project && <button type="button" className="composer-project" onClick={() => void changePanel(true)} title="查看项目文件"><Icon name="folder" size={13} /><span>{project.name}{project.location === 'local' ? ' · 本地电脑' : ' · 云端'}</span></button>}
       {cloudProject && <button type="button" className="composer-verification-toggle" aria-expanded={verificationOpen} aria-controls={verificationOpen ? 'project-verification-command' : undefined}

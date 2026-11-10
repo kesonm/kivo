@@ -137,13 +137,17 @@ test('ordinary chat, images, web citations and multipart analysis work through H
   const invalidModel = await restored.request('POST', `/api/threads/${a.id}/turns`, { text: 'test', model: 'arbitrary-model' });
   assert.equal(invalidModel.status, 400);
   assert.equal(invalidModel.data.code, 'chat_model_invalid');
-  const search = await toolTurn({ text: '联网查资料', tool: 'search', model: 'gpt-6-astra' }, [{ type: 'message', id: 'web-answer', role: 'assistant',
+  const invalidEffort = await restored.request('POST', `/api/threads/${a.id}/turns`, { text: 'test', model: 'gpt-6.1-sol', reasoningEffort: 'none' });
+  assert.equal(invalidEffort.status, 400);
+  assert.equal(invalidEffort.data.code, 'chat_reasoning_invalid');
+  const search = await toolTurn({ text: '联网查资料', tool: 'search', model: 'gpt-6-astra', reasoningEffort: 'xhigh' }, [{ type: 'message', id: 'web-answer', role: 'assistant',
     content: [{ type: 'output_text', text: '这是引用', annotations: [
       { type: 'url_citation', start_index: 0, end_index: 4, url: 'https://example.org/source', title: '资料' },
       { type: 'url_citation', start_index: 0, end_index: 4, url: 'javascript:alert(1)', title: 'Invalid' },
     ] }] }]);
   assert.deepEqual(search.call.payload.tools, [{ type: 'web_search' }]);
   assert.equal(search.call.payload.model, 'gpt-6-astra');
+  assert.deepEqual(search.call.payload.reasoning, { effort: 'xhigh' });
   const usageForSearch = (await restored.request('GET', '/api/account/usage')).data.usage.find(record => record.runId === search.run.id);
   assert.equal(usageForSearch.model, 'gpt-6-astra');
   assert.deepEqual(search.messages.at(-1).citations, [{ url: 'https://example.org/source', title: '资料', startIndex: 0, endIndex: 4 }]);
@@ -152,11 +156,13 @@ test('ordinary chat, images, web citations and multipart analysis work through H
   form.set('tool', 'analyze');
   form.set('text', '计算合计');
   form.set('model', 'gpt-6-luna');
+  form.set('reasoningEffort', 'none');
   form.append('files', new Blob(['value\n3\n5\n'], { type: 'text/csv' }), 'sales.csv');
   form.append('files', new Blob(['%PDF-1.4 fixture'], { type: 'application/pdf' }), 'notes.pdf');
   const analysis = await toolTurn(form, [{ type: 'message', id: 'file-answer', role: 'assistant', content: [{ type: 'output_text', text: '合计 8' }] }]);
   assert.deepEqual(analysis.call.payload.tool_choice, { type: 'code_interpreter' });
   assert.equal(analysis.call.payload.model, 'gpt-6-luna');
+  assert.deepEqual(analysis.call.payload.reasoning, { effort: 'none' });
   assert.deepEqual(analysis.call.payload.tools[0].container.file_ids, ['file-csvfixture']);
   assert.equal(analysis.call.payload.input.at(-1).content.at(-1).type, 'input_file');
   assert.deepEqual(analysis.messages.at(-2).attachments.map(file => file.name), ['sales.csv', 'notes.pdf']);

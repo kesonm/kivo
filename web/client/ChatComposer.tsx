@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useId, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ClipboardEvent, type CSSProperties, type FormEvent, type KeyboardEvent, type RefObject } from 'react';
 import { AttachmentChips } from './ChatContent';
 import { Icon } from './icons';
+import { effortLabels } from './reasoning';
 import { VoiceControls } from './VoiceControls';
-import type { ChatModelOption, ChatTool } from './types';
+import type { ChatModelOption, ChatTool, ReasoningEffort } from './types';
 
 const toolOptions = [
   { id: 'image', icon: 'image', label: '生成图片', description: '把文字描述变成图像', placeholder: '描述你想生成的图片' },
@@ -19,9 +20,12 @@ type ComposerProps = {
   onRemove: (index: number) => void;
   tool: ChatTool;
   onTool: (tool: Exclude<ChatTool, 'analyze'>) => void;
-  model?: string;
+  model?: ChatModelOption;
   models: ChatModelOption[];
   onModel: (model: string) => void;
+  effort?: ReasoningEffort;
+  onEffort: (effort?: ReasoningEffort) => void;
+  onOpenReasoning: () => void;
   threadId: string | null;
   providerConfigured: boolean;
   busy: boolean;
@@ -33,8 +37,8 @@ type ComposerProps = {
   onOpenLocal: () => void;
 };
 
-export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach, onRemove, tool, onTool, model, models, onModel, threadId, providerConfigured, busy, running, sending, stopping, onSend, onStop, onOpenLocal }: ComposerProps) {
-  const [menu, setMenu] = useState<'tools' | 'models' | null>(null);
+export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach, onRemove, tool, onTool, model, models, onModel, effort, onEffort, onOpenReasoning, threadId, providerConfigured, busy, running, sending, stopping, onSend, onStop, onOpenLocal }: ComposerProps) {
+  const [menu, setMenu] = useState<'tools' | 'reasoning' | 'models' | null>(null);
   const [opensBelow, setOpensBelow] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
   const form = useRef<HTMLFormElement>(null);
@@ -46,8 +50,11 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
   const blocked = busy || voiceBusy;
   const hasDraft = Boolean(draft.trim() || attachments.length);
   const selectedTool = toolOptions.find(option => option.id === tool);
-  const selectedModel = models.find(option => option.id === model);
-  const modelLabel = selectedModel?.label || model || '默认模型';
+  const modelLabel = model?.label || '默认模型';
+  const efforts = model?.efforts ?? [];
+  const effortIndex = Math.max(0, effort ? efforts.indexOf(effort) : 0);
+  const effortLabel = efforts.length ? effortLabels[efforts[effortIndex]] : '由模型决定';
+  const modelMenuOpen = (menu === 'reasoning' || menu === 'models') && !blocked;
   const nativeVoiceBlocked = typeof navigator !== 'undefined' && /\bkivo-iOS\//i.test(navigator.userAgent);
   const updateVoiceBusy = useCallback((value: boolean) => {
     setVoiceBusy(value);
@@ -59,7 +66,8 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
     const activeTrigger = menu === 'tools' ? toolTrigger.current : modelTrigger.current;
     const items = menuContent.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
     const selected = Array.from(items ?? []).find(item => item.getAttribute('aria-checked') === 'true');
-    (selected ?? items?.[0])?.focus({ preventScroll: true });
+    const slider = menuContent.current?.querySelector<HTMLInputElement>('input[type="range"]:not(:disabled)');
+    (slider ?? selected ?? items?.[0])?.focus({ preventScroll: true });
     function dismiss(event: PointerEvent) {
       if (event.target instanceof Node && !menuContent.current?.contains(event.target) && !activeTrigger?.contains(event.target)) setMenu(null);
     }
@@ -67,13 +75,27 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
     return () => document.removeEventListener('pointerdown', dismiss);
   }, [menu, blocked]);
 
-  function toggleMenu(next: 'tools' | 'models') {
-    const bottom = form.current?.getBoundingClientRect().bottom ?? window.innerHeight;
-    setOpensBelow(window.innerHeight - bottom >= 260);
-    setMenu(current => current === next ? null : next);
+  function toggleMenu(next: 'tools' | 'reasoning') {
+    if (menu === next || (next === 'reasoning' && menu === 'models')) {
+      setMenu(null);
+      return;
+    }
+    const bounds = form.current?.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - (bounds?.bottom ?? window.innerHeight);
+    const spaceAbove = bounds?.top ?? 0;
+    setOpensBelow(next === 'tools' ? spaceBelow >= 260 : spaceAbove < 248 && spaceBelow > spaceAbove);
+    setMenu(next);
+    if (next === 'reasoning') onOpenReasoning();
   }
 
   function navigateMenu(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Escape' && menu === 'models') {
+      event.preventDefault();
+      event.stopPropagation();
+      setMenu('reasoning');
+      return;
+    }
+    if (menu === 'reasoning' && event.key !== 'Escape') return;
     if (event.key === 'Escape' || event.key === 'Tab') {
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); }
       (menu === 'tools' ? toolTrigger : modelTrigger).current?.focus();
@@ -151,8 +173,8 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
           }
         }} />
       <div className="composer-controls">
-        <button ref={modelTrigger} type="button" className="composer-model-picker" title={`当前模型 ${modelLabel}`} aria-label={`选择模型，当前为 ${modelLabel}`} aria-haspopup="menu"
-          aria-expanded={menu === 'models' && !blocked} aria-controls={menu === 'models' && !blocked ? menuId : undefined} disabled={blocked || !models.length} onClick={() => toggleMenu('models')}>
+        <button ref={modelTrigger} type="button" className="composer-model-picker" title={`${modelLabel} · 思考程度 ${effortLabel}`} aria-label={`选择思考程度，当前模型 ${modelLabel}，${effortLabel}`} aria-haspopup="dialog"
+          aria-expanded={modelMenuOpen} aria-controls={modelMenuOpen ? menuId : undefined} disabled={blocked || !models.length} onClick={() => toggleMenu('reasoning')}>
           <span>{modelLabel}</span><Icon name="down" size={13} />
         </button>
         <VoiceControls disabled={busy || !providerConfigured || nativeVoiceBlocked} disabledReason={nativeVoiceBlocked ? '请在浏览器中使用语音功能' : undefined}
@@ -164,7 +186,12 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
         </button>}
       </div>
     </div>
-    {menu && !blocked && <div ref={menuContent} id={menuId} role="menu" aria-label={menu === 'tools' ? '可用工具' : '选择模型'} onKeyDown={navigateMenu}
+    {menu && !blocked && <div ref={menuContent} id={menuId} role={menu === 'reasoning' ? 'dialog' : 'menu'}
+      aria-label={menu === 'tools' ? '可用工具' : menu === 'reasoning' ? '思考程度' : '选择模型'} onKeyDown={navigateMenu}
+      onBlur={event => {
+        if (menu === 'reasoning' && event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)
+            && !modelTrigger.current?.contains(event.relatedTarget)) setMenu(null);
+      }}
       className={`composer-popover composer-popover-${menu} ${opensBelow ? 'popover-below' : 'popover-above'}`}>
       {menu === 'tools' ? <>
         <button type="button" role="menuitem" disabled={attachments.length >= maxFiles} onClick={() => { setMenu(null); fileInput.current?.click(); }}>
@@ -177,10 +204,44 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
         <button type="button" role="menuitem" onClick={() => { setMenu(null); onOpenLocal(); }}>
           <Icon name="folder" size={17} /><span className="composer-option-title">打开本地文件夹</span><span className="composer-option-description">进入本地项目对话</span>
         </button>
-      </> : models.map(option => <button type="button" role="menuitemradio" aria-checked={option.id === model} key={option.id} onClick={() => { onModel(option.id); setMenu(null); textarea.current?.focus(); }}>
-        <span className="composer-model-option"><span className="composer-option-title">{option.label}</span>{option.description && <span className="composer-option-description">{option.description}</span>}</span>
-        {option.id === model && <Icon name="check" size={17} />}
-      </button>)}
+      </> : menu === 'reasoning' ? <>
+        <div className="reasoning-heading">
+          <Icon name="spark" size={15} />
+          <div className="reasoning-selection">
+            <span className="reasoning-value">{effortLabel}</span>
+            <button type="button" className="reasoning-model-link" aria-haspopup="menu" aria-label={`切换模型，当前为 ${modelLabel}`} onClick={() => setMenu('models')}>
+              <span>{modelLabel}</span><Icon name="chevron" size={12} />
+            </button>
+          </div>
+          <button type="button" className="reasoning-reset" title="恢复默认思考档位" aria-label="恢复默认思考档位"
+            disabled={efforts.length < 2 || effort === model?.defaultEffort} onClick={() => {
+              onEffort();
+              menuContent.current?.querySelector('input')?.focus();
+            }}>
+            <Icon name="refresh" size={14} />
+          </button>
+        </div>
+        {efforts.length > 0 && <div className="reasoning-track" style={{ '--reasoning-position': efforts.length > 1 ? effortIndex / (efforts.length - 1) : 0 } as CSSProperties}>
+          <div className="reasoning-marks" aria-hidden="true">
+            {efforts.map((level, index) => <span key={level} className={index <= effortIndex ? 'filled' : undefined} />)}
+          </div>
+          <input aria-label="思考程度" aria-valuetext={effortLabel} type="range" min={0} max={Math.max(1, efforts.length - 1)} step={1}
+            value={effortIndex} disabled={efforts.length < 2} onChange={event => onEffort(efforts[Number(event.currentTarget.value)])} />
+        </div>}
+        {!efforts.length && <p className="reasoning-unavailable">此模型未配置思考档位</p>}
+      </> : <>
+        <button type="button" role="menuitem" className="reasoning-back" onClick={() => setMenu('reasoning')}>
+          <Icon name="chevron" size={13} />返回思考程度
+        </button>
+        {models.map(option => <button type="button" role="menuitemradio" aria-checked={option.id === model?.id} key={option.id}
+          onClick={() => { onModel(option.id); setMenu('reasoning'); }}>
+          <span className="composer-model-option">
+            <span className="composer-option-title">{option.label}</span>
+            {option.description && <span className="composer-option-description">{option.description}</span>}
+          </span>
+          {option.id === model?.id && <Icon name="check" size={17} />}
+        </button>)}
+      </>}
     </div>}
   </form>;
 }

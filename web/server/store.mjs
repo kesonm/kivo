@@ -3,6 +3,7 @@ import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createCredentialCipher, validateApiKey } from './credentials.mjs';
+import { defaultChatModelCatalog, validateChatModelCatalog } from './chat-models.mjs';
 
 export class AppError extends Error {
   constructor(message, status = 400, code = 'invalid_request') {
@@ -206,6 +207,9 @@ export function createStore(dbPath,{credentialsKey}={}) {
       id TEXT PRIMARY KEY, actor_id TEXT REFERENCES users(id), action TEXT NOT NULL,
       target TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS chat_model_settings (
+      id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, catalog TEXT NOT NULL
+    );
   `);
   try {
     migrateStandaloneThreads(db);
@@ -306,6 +310,26 @@ export function createStore(dbPath,{credentialsKey}={}) {
   const audit = (actorId, action, target, detail = '') => db.prepare('INSERT INTO audit VALUES(?,?,?,?,?,?)').run(id(),actorId ?? null,action,target,String(detail).slice(0,2000),now());
   const api = {
     db, close:()=>db.close(),
+    getChatModelCatalog(defaultModel) {
+      const saved = db.prepare('SELECT revision,catalog FROM chat_model_settings WHERE id=1').get();
+      return saved ? { ...JSON.parse(saved.catalog), revision: saved.revision }
+        : { ...defaultChatModelCatalog(defaultModel), revision: 0 };
+    },
+    setChatModelCatalog(input, actorId) {
+      const catalog = validateChatModelCatalog(input);
+      if (!Number.isSafeInteger(input.revision) || input.revision < 0) throw new AppError('配置版本无效');
+      return tx(() => {
+        const current = db.prepare('SELECT revision FROM chat_model_settings WHERE id=1').get()?.revision ?? 0;
+        if (current !== input.revision) throw new AppError('模型列表已更新，请重新加载后再保存', 409, 'chat_catalog_conflict');
+        const revision = current + 1;
+        db.prepare(`INSERT INTO chat_model_settings (id,revision,catalog) VALUES (1,?,?)
+          ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,catalog=excluded.catalog`).run(revision, JSON.stringify(catalog));
+        audit(actorId, 'admin.chat_models.updated', catalog.defaultModel, JSON.stringify({
+          models: catalog.models.length, enabled: catalog.models.filter(option => option.enabled).length,
+        }));
+        return { ...catalog, revision };
+      });
+    },
     getUser: (userId) => userView(db.prepare('SELECT * FROM users WHERE id=?').get(userId)),
     getUserByUsername: (username) => userView(db.prepare('SELECT * FROM users WHERE username=?').get(username.toLowerCase())),
     getPasswordHash: (userId) => db.prepare('SELECT password_hash FROM users WHERE id=?').get(userId)?.password_hash,
