@@ -141,6 +141,8 @@ test('administrators configure chat models and the server enforces their enabled
   await member.request('PUT', '/api/account/api-key', { apiKey: keyA });
   const settings = (await administrator.request('GET', '/api/admin/models')).data;
   assert.deepEqual(settings.knownEfforts['gpt-6-sol'], ['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+  assert.equal(settings.models.find(model => model.id === 'gpt-6-sol').enabled, false);
+  assert.ok(!(await member.request('GET', '/api/session')).data.chatModels.some(model => model.id === 'gpt-6-sol'));
   assert.equal((await member.request('GET', '/api/admin/models')).status, 403);
   assert.equal((await member.request('PUT', '/api/admin/models', settings)).status, 403);
   assert.equal((await administrator.request('PUT', '/api/admin/models', settings, { 'X-CSRF-Token': '' })).status, 403);
@@ -150,9 +152,10 @@ test('administrators configure chat models and the server enforces their enabled
 
   const changed = structuredClone(settings);
   changed.defaultModel = 'gpt-6-luna';
-  Object.assign(changed.models.find(model => model.id === 'gpt-6-luna'), { efforts: ['none', 'high'], defaultEffort: 'high' });
+  const [luna] = changed.models.splice(changed.models.findIndex(model => model.id === 'gpt-6-luna'), 1);
+  changed.models.unshift(Object.assign(luna, { efforts: ['none', 'high'], defaultEffort: 'high' }));
   changed.models.find(model => model.id === 'gpt-6-astra').enabled = false;
-  changed.models.push({ id: 'gpt-6-sol', label: 'Sol 配置项', description: '', enabled: true, efforts: ['medium'], defaultEffort: 'medium' });
+  Object.assign(changed.models.find(model => model.id === 'gpt-6-sol'), { label: 'Sol 配置项', enabled: true, efforts: ['medium'] });
   const saved = await administrator.request('PUT', '/api/admin/models', changed);
   assert.equal(saved.status, 200);
   assert.equal(saved.data.revision, settings.revision + 1);
@@ -162,9 +165,9 @@ test('administrators configure chat models and the server enforces their enabled
   const session = (await member.request('GET', '/api/session')).data;
   assert.equal(session.model, 'model');
   assert.equal(session.defaultChatModel, 'gpt-6-luna');
+  assert.deepEqual(session.chatModels.map(model => model.id), ['gpt-6-luna', 'model', 'gpt-6.1-sol', 'gpt-6-sol']);
   assert.deepEqual(session.chatModels.find(model => model.id === 'gpt-6-luna').efforts, ['none', 'high']);
   assert.ok(session.chatModels.some(model => model.label === 'Sol 配置项'));
-  assert.ok(!session.chatModels.some(model => model.id === 'gpt-6-astra'));
   const thread = (await member.request('POST', '/api/threads', {})).data.thread;
   const turn = `/api/threads/${thread.id}/turns`;
   assert.equal((await member.request('POST', turn, { text: 'test', model: 'gpt-6-astra' })).data.code, 'chat_model_invalid');
