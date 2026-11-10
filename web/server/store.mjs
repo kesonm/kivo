@@ -214,7 +214,11 @@ export function createStore(dbPath,{credentialsKey}={}) {
   try {
     migrateStandaloneThreads(db);
     db.exec(`CREATE INDEX IF NOT EXISTS threads_owner_scope ON threads(user_id,project_id,updated_at);
-      CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_thread ON runs(thread_id) WHERE status='running';`);
+      CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_thread ON runs(thread_id) WHERE status='running';
+      CREATE TABLE IF NOT EXISTS kibot_threads (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        thread_id TEXT UNIQUE NOT NULL REFERENCES threads(id) ON DELETE CASCADE
+      );`);
   } catch(error) { db.close(); throw error; }
   const tx = (fn) => {
     db.exec('BEGIN IMMEDIATE');
@@ -239,7 +243,8 @@ export function createStore(dbPath,{credentialsKey}={}) {
       apiKeyConfigured:key.configured,keyLast4:key.last4,createdAt:r.created_at};
   };
   const projectView = (r) => { if(!r)return null;const local=db.prepare('SELECT device_id,path FROM local_projects WHERE project_id=?').get(r.id);return {id:r.id,userId:r.user_id,name:r.name,createdAt:r.created_at,updatedAt:r.updated_at,...(local?{location:'local',deviceId:local.device_id,localPath:local.path}:{location:'cloud'})}; };
-  const threadView = (r) => r ? ({id:r.id,projectId:r.project_id,userId:r.user_id,title:r.title,codexThreadId:r.codex_thread_id,createdAt:r.created_at,updatedAt:r.updated_at}) : null;
+  const threadView = (r) => r ? ({id:r.id,projectId:r.project_id,userId:r.user_id,title:r.title,codexThreadId:r.codex_thread_id,createdAt:r.created_at,updatedAt:r.updated_at,
+    ...(db.prepare('SELECT 1 FROM kibot_threads WHERE thread_id=? AND user_id=?').get(r.id,r.user_id)?{isPrimary:true}:{})}) : null;
   const runRows = `SELECT r.*,d.mode,d.resumed_from_run_id,d.request_message_id,d.verification_command,
     d.verification_status,d.verification_exit_code,d.interrupt_reason FROM runs r LEFT JOIN run_details d ON d.run_id=r.id`;
   const runView = (r) => r ? ({id:r.id,threadId:r.thread_id,projectId:r.project_id,userId:r.user_id,status:r.status,
@@ -486,7 +491,7 @@ export function createStore(dbPath,{credentialsKey}={}) {
       const threadId=id(),at=now();
       if(projectId===null){
         if(!api.getUser(userId))throw new AppError('用户不存在',404);
-        if(db.prepare('SELECT count(*) n FROM threads WHERE user_id=? AND project_id IS NULL').get(userId).n>=500)throw new AppError('每个账号最多 500 个普通对话',409);
+        if(db.prepare('SELECT count(*) n FROM threads WHERE user_id=? AND project_id IS NULL AND id NOT IN (SELECT thread_id FROM kibot_threads)').get(userId).n>=500)throw new AppError('每个账号最多 500 个普通对话',409);
       }else{
         const p=api.getProject(projectId);if(!p||p.userId!==userId)throw new AppError('项目不存在',404);
         if(db.prepare('SELECT count(*) n FROM threads WHERE project_id=?').get(projectId).n>=500)throw new AppError('每个项目最多 500 个对话',409);
@@ -495,10 +500,10 @@ export function createStore(dbPath,{credentialsKey}={}) {
     },
     getThread: threadId=>threadView(db.prepare('SELECT * FROM threads WHERE id=?').get(threadId)),
     listThreads: projectId=>db.prepare('SELECT * FROM threads WHERE project_id=? ORDER BY updated_at DESC').all(projectId).map(threadView),
-    listStandaloneThreads: userId=>db.prepare('SELECT * FROM threads WHERE user_id=? AND project_id IS NULL ORDER BY updated_at DESC,rowid DESC').all(userId).map(threadView),
+    listStandaloneThreads: userId=>db.prepare('SELECT * FROM threads WHERE user_id=? AND project_id IS NULL AND id NOT IN (SELECT thread_id FROM kibot_threads) ORDER BY updated_at DESC,rowid DESC').all(userId).map(threadView),
     updateThread(threadId,patch) {
       const t=api.getThread(threadId);if(!t)throw new AppError('对话不存在',404);
-      db.prepare('UPDATE threads SET title=?,codex_thread_id=?,updated_at=? WHERE id=?').run(patch.title??t.title,patch.codexThreadId??t.codexThreadId,now(),threadId);return api.getThread(threadId);
+      db.prepare('UPDATE threads SET title=?,codex_thread_id=?,updated_at=? WHERE id=?').run(t.isPrimary?'kibot':patch.title??t.title,patch.codexThreadId??t.codexThreadId,now(),threadId);return api.getThread(threadId);
     },
     appendMessage(threadId,role,content,{attachments=[],citations=[],artifacts=[],uploads=[]}={}) {
       if(uploads.length&&(role!=='user'||artifacts.length||attachments.length))throw new AppError('附件只能保存到对应的用户消息');
@@ -529,6 +534,13 @@ export function createStore(dbPath,{credentialsKey}={}) {
         db.prepare('UPDATE projects SET updated_at=? WHERE id=(SELECT project_id FROM threads WHERE id=?)').run(at,threadId);
         return {id:messageId,threadId,role,content,createdAt:at,...metadata,...(artifacts.length?{artifacts:saved}:{})};
       });
+    },
+    getMessage(messageId) {
+      const r=db.prepare(`SELECT m.*,x.metadata FROM messages m LEFT JOIN chat_message_metadata x ON x.message_id=m.id WHERE m.id=?`).get(messageId);
+      if(!r)return null;
+      const artifacts=r.role==='assistant'?db.prepare('SELECT id,name,mime_type,size FROM chat_artifacts WHERE message_id=? ORDER BY rowid').all(messageId).map(artifactView):[];
+      return {id:r.id,role:r.role,content:r.content,createdAt:r.created_at,
+        ...(r.metadata?JSON.parse(r.metadata):{}),...(artifacts.length?{artifacts}:{})};
     },
     getMessages(threadId) {
       const artifacts=new Map();

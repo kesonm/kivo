@@ -42,9 +42,10 @@ type ComposerProps = {
   workRestricted?: boolean;
   voiceRestricted?: boolean;
   onBusyChange?: (busy: boolean) => void;
+  placeholder?: string;
 };
 
-export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach, onRemove, tool, onTool, model, models, onModel, effort, onEffort, ultra, ultraAvailable, onUltra, onOpenReasoning, threadId, providerConfigured, busy, running, sending, stopping, onSend, onStop, onOpenLocal, workRestricted = false, voiceRestricted = false, onBusyChange }: ComposerProps) {
+export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach, onRemove, tool, onTool, model, models, onModel, effort, onEffort, ultra, ultraAvailable, onUltra, onOpenReasoning, threadId, providerConfigured, busy, running, sending, stopping, onSend, onStop, onOpenLocal, workRestricted = false, voiceRestricted = false, onBusyChange, placeholder }: ComposerProps) {
   const [menu, setMenu] = useState<'tools' | 'reasoning' | 'models' | null>(null);
   const [opensBelow, setOpensBelow] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
@@ -174,7 +175,7 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
         event.currentTarget.value = '';
       }} />
       <textarea ref={textarea} value={draft} onChange={event => setDraft(event.target.value)}
-        placeholder={running ? 'kivo 正在执行任务…' : tool === 'analyze' ? '你想了解附件中的哪些内容？' : selectedTool?.placeholder || '有问题，尽管问'}
+        placeholder={running ? 'kivo 正在执行任务…' : tool === 'analyze' ? '你想了解附件中的哪些内容？' : selectedTool?.placeholder || placeholder || '有问题，尽管问'}
         aria-label="发送给 kivo 的消息" disabled={blocked} maxLength={24000} rows={1} onKeyDown={event => {
           if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
             event.preventDefault();

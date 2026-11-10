@@ -30,7 +30,9 @@ export function RunDetails({runId, live, events = [], error, refresh = () => {}}
   for(const source of snapshot?.sources || []) if(source.kind==='message') {
     const key=source.conversationId || source.id!; histories.set(key,[...(histories.get(key)||[]),source]);
   }
-  return <div className="execution-details">
+  return <details className="execution-details-group">
+    <summary><Icon name="terminal" size={15}/><span>执行详情</span><small>{live?.status === 'running' ? '正在执行' : '活动与上下文来源'}</small><Icon name="down" size={14}/></summary>
+    <div className="execution-details">
     {live ? <TaskActivity run={live} events={events} error={error} refresh={refresh}/> : activityOpen ? <HistoricalActivity runId={runId}/> : <button className="execution-summary" onClick={()=>setActivityOpen(true)}><Icon name="terminal" size={15}/>执行活动<Icon name="down" size={14}/></button>}
     <details className="context-disclosure" onToggle={e=>{if(e.currentTarget.open)setWanted(true);}}>
       <summary><Icon name="folder" size={15}/>上下文来源{snapshot?.recorded && <small>{histories.size} 个历史对话</small>}<Icon name="down" size={14}/></summary>
@@ -47,5 +49,6 @@ export function RunDetails({runId, live, events = [], error, refresh = () => {}}
     <details className="context-disclosure" onToggle={e=>{if(e.currentTarget.open)setWanted(true);}}><summary><Icon name="chat" size={15}/>本次执行会话<Icon name="down" size={14}/></summary>
       {failure ? <p role="alert">{failure}<button onClick={()=>setRetry(n=>n+1)}>重试</button></p> : !snapshot ? <p>正在读取会话…</p> : !snapshot.execution ? <p>旧执行未记录会话映射。</p> : <><p>{lifecycle[snapshot.execution.lifecycle] || '执行会话'} · {snapshot.execution.mode==='cloud'?'云端项目':snapshot.execution.mode==='local'?'本地电脑':'普通聊天'}</p>{snapshot.execution.mode==='chat' && snapshot.execution.lifecycle!=='attachments' && <p>本次使用 Responses 请求；历史引用不会恢复来源会话执行。</p>}<code>Run：{runId}</code>{snapshot.execution.sessionId && <code>Session：{snapshot.execution.sessionId}</code>}{snapshot.execution.threadId && <code>引擎线程：{snapshot.execution.threadId}</code>}</>}
     </details>
-  </div>;
+    </div>
+  </details>;
 }

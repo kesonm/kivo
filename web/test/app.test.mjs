@@ -34,6 +34,31 @@ async function register(client,username){const r=await client.request('POST','/a
 async function loginAdmin(client){const r=await client.request('POST','/api/auth/login',{username:'admin',password});assert.equal(r.status,200);}
 async function projectThread(client){const project=(await client.request('POST','/api/projects',{name:'Private project'})).data.project;const thread=(await client.request('POST',`/api/projects/${project.id}/threads`,{})).data.thread;return {project,thread};}
 
+test('kibot HTTP identity is authenticated, CSRF protected, scoped and separate from task history',async t=>{
+  const {client,store}=await fixture(t);const anonymous=await client();
+  assert.equal((await anonymous.request('POST','/api/kibot',{})).status,401);
+  const alice=await client(),bob=await client();await register(alice,'alice');await register(bob,'bobby');
+  assert.equal((await alice.request('POST','/api/kibot',{}, {'X-CSRF-Token':''})).status,403);
+  assert.equal((await alice.request('POST','/api/kibot',{userId:'someone-else'})).status,400);
+  const primary=(await alice.request('POST','/api/kibot',{})).data.thread;
+  assert.equal(primary.title,'kibot');assert.equal(primary.isPrimary,true);
+  assert.equal((await alice.request('POST','/api/kibot',{})).data.thread.id,primary.id);
+  assert.notEqual((await bob.request('POST','/api/kibot',{})).data.thread.id,primary.id);
+  const message=store.appendMessage(primary.id,'user','Only Alice sees this history');
+  store.db.prepare('UPDATE messages SET created_at=? WHERE id=?').run('2026-01-01T00:00:00.000Z',message.id);
+  const timeline=await alice.request('GET','/api/kibot/timeline?timeZone=UTC');
+  assert.equal(timeline.status,200);assert.equal(timeline.data.threadId,primary.id);
+  const summaryId=timeline.data.summaries[0].id;
+  assert.equal((await alice.request('GET',`/api/kibot/history?timeZone=UTC&summaryId=${summaryId}`)).data.messages[0].content,message.content);
+  assert.equal((await bob.request('GET',`/api/kibot/history?timeZone=UTC&summaryId=${summaryId}`)).status,404);
+  assert.equal((await alice.request('GET','/api/kibot/timeline?userId=someone-else')).status,400);
+  assert.equal((await alice.request('GET','/api/kibot/timeline?timeZone=NotAZone')).status,400);
+  assert.ok(!(await alice.request('GET','/api/history')).data.threads.some(row=>row.id===primary.id));
+  const admin=await client();await loginAdmin(admin);
+  assert.ok((await admin.request('GET','/api/admin/threads')).data.threads.some(row=>row.id===primary.id));
+  assert.equal((await alice.request('POST',`/api/threads/${primary.id}/turns`,{text:'Run a task',work:{intent:'new'}})).data.code,'kibot_task_separate');
+});
+
 test('password hashing is salted and verifies without retaining plaintext',async()=>{
   const a=await hashPassword(password),b=await hashPassword(password);assert.notEqual(a,b);assert.ok(!a.includes(password));assert.equal(await verifyPassword(password,a),true);assert.equal(await verifyPassword('incorrect password',a),false);
 });

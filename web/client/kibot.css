@@ -1,0 +1,168 @@
+/* The primary conversation and independent work share a shell, not a history. */
+.kibot-shell {
+  --kibot-red: #d92029;
+  --kibot-soft: #fbeae7;
+  --kibot-border: #e8e4e1;
+  --muted: #79736e;
+  background: #fff;
+}
+.kibot-shell .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.kibot-sidebar {
+  display: flex; flex-direction: column; flex: 0 0 246px; width: 246px;
+  min-height: 0; padding: 25px 14px 14px; background: #faf8f6;
+  border-right: 1px solid var(--kibot-border); z-index: 35;
+}
+.kibot-nav-brand { display: flex; align-items: center; justify-content: space-between; min-height: 42px; margin: 0 12px 29px; }
+.kibot-nav-brand .brand { font-size: 25px; gap: 10px; }
+.kibot-nav-brand .brand-mark { width: 35px; height: 35px; }
+.kibot-primary-link {
+  display: flex; align-items: center; gap: 13px; width: 100%; padding: 15px 17px;
+  border-radius: 12px; text-align: left; min-height: 76px; transition: background .15s;
+}
+.kibot-primary-link.selected { background: var(--kibot-soft); }
+.kibot-primary-link > .icon { color: var(--kibot-red); width: 23px; height: 23px; }
+.kibot-primary-link strong { display: block; font-size: 19px; font-weight: 650; letter-spacing: -.4px; }
+.kibot-primary-link small { display: block; font-size: 12px; color: var(--muted); margin-top: 5px; }
+.kibot-sidebar .nav-action { display: flex; align-items: center; gap: 12px; padding: 13px 17px; width: 100%; min-height: 44px; text-align: left; font-size: 14px; border-radius: 10px; margin-top: 5px; }
+.nav-action:hover, .nav-task-row:hover, .nav-profile:hover { background: #f0ede9; }
+.nav-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 22px 9px 10px; padding-top: 22px; border-top: 1px solid var(--kibot-border); font-size: 13px; font-weight: 600; color: #625b56; }
+.nav-section-heading .icon-button { border: 1px solid #e2dcd6; border-radius: 9px; background: #fff9; width: 28px; min-width: 28px; height: 28px; min-height: 28px; }
+.nav-recent-list { overflow-y: auto; overflow-x: hidden; min-height: 0; flex: 1; padding-bottom: 20px; }
+.nav-task-row { display: flex; width: 100%; align-items: center; gap: 10px; padding: 11px 13px; min-height: 43px; border-radius: 9px; text-align: left; font-size: 13px; }
+.nav-task-row > span, .nav-task-row > div { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-task-row.selected { background: #ede8e2; color: #241e19; }
+.nav-task-row strong { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 13px; font-weight: 500; }
+.nav-task-row small { display: block; font-size: 10px; color: #998e82; margin-top: 4px; }
+.nav-more { display: flex; align-items: center; gap: 8px; padding: 13px; font-size: 11px; color: #8a7b6d; }
+.nav-task-row .nav-task-status { flex: 0 0 auto; max-width: 62px; font-size: 10px; color: var(--muted); }
+.nav-legacy-label { font-size: 11px; color: #8c847d; padding: 20px 13px 7px; }
+.nav-bottom { padding: 13px 4px 0; border-top: 1px solid var(--kibot-border); margin-top: auto; }
+.nav-profile { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 8px; min-height: 48px; text-align: left; border-radius: 10px; }
+.nav-profile .sidebar-avatar { background: #e9ddd5; color: #76584b; }
+.nav-profile strong { display: block; font-size: 13px; font-weight: 550; }
+.nav-profile small { display: block; font-size: 11px; color: var(--muted); margin-top: 3px; }
+.nav-profile > .icon:last-child { margin-left: auto; }
+.kibot-mobile-topbar, .kibot-nav-brand > .icon-button { display: none; }
+.nav-empty { color: var(--muted); font-size: 12px; line-height: 1.8; padding: 16px 13px; }
+
+/* Navigation dialogs keep the desktop sidebar quiet. */
+.nav-dialog-body { overflow: auto; min-height: 0; padding: 18px 22px 24px; }
+.nav-dialog-body h3 { font-size: 12px; color: var(--muted); margin: 20px 4px 10px; font-weight: 500; }
+.nav-dialog-body .nav-action { display: flex; width: 100%; align-items: center; gap: 11px; padding: 13px 12px; border-radius: 10px; text-align: left; font-size: 14px; }
+.nav-dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 16px 22px; border-top: 1px solid var(--kibot-border); }
+.nav-search-field { display: flex; align-items: center; gap: 9px; padding: 10px 13px; border: 1px solid #dfdad5; border-radius: 10px; margin-bottom: 14px; }
+.nav-search-field input { border: 0; box-shadow: none; width: 100%; background: transparent; font-size: 14px; padding: 2px 0; }
+.nav-result-row { display: flex; align-items: center; width: 100%; gap: 12px; padding: 13px 11px; border-radius: 9px; text-align: left; }
+.nav-result-row:hover { background: #f7f5f2; }
+.nav-result-row > span, .nav-result-row > div { flex: 1; min-width: 0; }
+.nav-result-row strong { display: block; font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+.nav-result-row small { display: block; color: var(--muted); font-size: 11px; margin-top: 5px; }
+
+/* Conversation timeline. Red is reserved for the current primary entry/actions. */
+.kibot-shell .workspace-header { border-bottom: 1px solid #f0edea; min-height: 70px; }
+.kibot-shell .workspace-header.kibot-header { display: flex; height: auto; justify-content: space-between; align-items: center; gap: 18px; padding: 21px 32px; min-height: 96px; border-bottom: 1px solid #eeeae6; flex-shrink: 0; }
+.kibot-heading { display: flex; flex-wrap: wrap; gap: 8px 11px; align-items: center; }
+.kibot-heading > div { display: flex; align-items: center; gap: 11px; }
+.kibot-heading h1 { font-size: 25px; letter-spacing: -.7px; margin: 0; font-weight: 650; }
+.kibot-heading p { flex-basis: 100%; margin: 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+.kibot-badge { display: inline-flex; align-items: center; color: #b72229; background: #fcece8; border-radius: 7px; padding: 4px 8px; font-size: 11px; font-weight: 550; }
+.kibot-organized { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; color: #77716b; white-space: nowrap; }
+.kibot-workspace .messages-list { max-width: 880px; padding: 28px 36px 16px; }
+.kibot-workspace .composer-area { max-width: 880px; padding: 14px 28px 20px; }
+.kibot-timeline { min-width: 0; }
+.kibot-timeline-note { font-size: 11px; color: #8b837b; margin: 0 0 22px; line-height: 1.8; }
+.kibot-summary-group { margin-bottom: 28px; }
+.kibot-date-heading { font-size: 17px; font-weight: 600; color: #302a26; margin: 0 0 15px; letter-spacing: -.3px; }
+.kibot-summary-card { display: block; text-align: left; width: 100%; border: 1px solid #e3dfda; border-radius: 13px; background: #fff; padding: 18px 20px 0; margin-bottom: 12px; transition: border-color .15s, background .15s; overflow: hidden; }
+.kibot-summary-card:hover { border-color: #cbbfb4; }
+.kibot-summary-card.selected { border-color: #df7775; background: #fff9f7; }
+.kibot-summary-meta { display: flex; align-items: center; gap: 7px; color: #81786f; font-size: 11px; margin-bottom: 11px; }
+.kibot-summary-card > strong { display: block; margin: 0 0 10px; font-size: 15px; line-height: 1.65; font-weight: 600; overflow-wrap: anywhere; }
+.kibot-summary-bullets { display: grid; gap: 5px; margin-bottom: 16px; color: #6b6157; font-size: 12px; line-height: 1.85; }
+.kibot-summary-bullets > span { display: block; padding-left: 12px; position: relative; overflow-wrap: anywhere; }
+.kibot-summary-bullets > span::before { content: '·'; position: absolute; left: 1px; font-weight: 700; color: #b2a495; }
+.kibot-summary-extract { margin-left: auto; color: #94887c; font-size: 10px; }
+.kibot-summary-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px; min-height: 43px; padding: 9px 0; border-top: 1px solid #eee8e2; font-size: 11px; color: var(--muted); }
+.kibot-summary-footer > span { display: flex; align-items: center; gap: 6px; }
+.kibot-summary-footer > span:last-child { font-size: 12px; font-weight: 500; }
+.kibot-summary-card.selected .kibot-summary-footer > span:last-child { color: #bd2528; }
+.kibot-current-divider { display: flex; gap: 14px; align-items: center; color: #938b83; font-size: 11px; margin: 25px 0 24px; }
+.kibot-current-divider::after { content: ''; flex: 1; height: 1px; background: #ebe6e1; }
+.kibot-current-empty { padding: 12px 0 20px; color: #6d635b; line-height: 1.9; font-size: 14px; }
+.kibot-current-empty { display: flex; align-items: flex-start; gap: 14px; }
+.kibot-current-empty > span { width: 30px; height: 30px; flex: 0 0 30px; }
+.kibot-current-empty strong { font-weight: 500; color: #393028; }
+.kibot-current-empty p { font-size: 12px; color: #8a7c70; margin: 5px 0 0; }
+.kibot-composer-note { margin: 8px 10px 0; color: #9b9085; font-size: 10px; line-height: 1.7; }
+.kibot-load-more { display: flex; align-items: center; justify-content: center; gap: 7px; margin: 8px auto 23px; padding: 9px 16px; font-size: 12px; border: 1px solid #e8e2dc; border-radius: 9px; color: #74685d; }
+.kibot-shell .composer { border-radius: 18px; border-color: #e3ddd7; box-shadow: 0 3px 18px #36231207; }
+.kibot-shell .composer:focus-within { border-color: #c8b9ad; box-shadow: 0 3px 18px #3623120b; }
+.kibot-shell .send-button, .kibot-shell .composer-voice-primary { border-radius: 11px; background: var(--kibot-red); }
+.kibot-shell .send-button:hover:not(:disabled), .kibot-shell .composer-voice-primary:hover:not(:disabled) { background: #bd171f; }
+.kibot-shell .send-button:disabled { background: #eee9e4; color: #b7aca1; }
+.kibot-shell .stop-button { background: #3d332c; }
+.kibot-shell .composer-footer { font-size: 10px; color: #958b82; }
+.kibot-shell .user-message-content { background: #f4f2ef; }
+.execution-details-group { margin: 17px 0 12px; border: 1px solid #ebe7e2; border-radius: 10px; color: #7b7268; font-size: 12px; }
+.execution-details-group > summary { display: flex; align-items: center; gap: 9px; list-style: none; cursor: pointer; padding: 11px 13px; }
+.execution-details-group > summary::-webkit-details-marker { display: none; }
+.execution-details-group > summary > .icon:last-child { margin-left: auto; transition: transform .15s; }
+.execution-details-group[open] > summary > .icon:last-child { transform: rotate(180deg); }
+.execution-details-group > summary small { font-size: 10px; color: #9a8f83; }
+.execution-details-group .execution-details { margin: 0; padding: 0 10px 10px; }
+
+/* Read-only original history. It has its own scroll, never its own composer. */
+.kibot-history-panel { width: clamp(360px, 31vw, 500px); flex: 0 0 auto; min-width: 0; display: flex; flex-direction: column; background: #fcfaf8; border-left: 1px solid #e8e1da; min-height: 0; z-index: 40; }
+.kibot-history-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 26px 25px 21px; border-bottom: 1px solid #eee7df; flex-shrink: 0; }
+.kibot-history-header h2 { font-size: 19px; font-weight: 600; letter-spacing: -.3px; margin: 0 0 9px; line-height: 1.5; }
+.kibot-history-subtitle { font-size: 11px; color: #8b8176; line-height: 1.7; margin: 0; }
+.kibot-history-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 24px; }
+.kibot-history-message { padding-top: 28px; padding-bottom: 27px; position: relative; }
+.kibot-history-time { position: absolute; top: 0; left: 0; color: #95897d; font-size: 11px; margin: 0 0 12px; display: flex; align-items: center; gap: 12px; width: 100%; }
+.kibot-history-time::after { content: ''; height: 1px; background: #e9e1d8; flex: 1; }
+.kibot-history-note { margin: 14px 25px 0; font-size: 10px; color: #9d9083; }
+.kibot-history-end { text-align: center; font-size: 11px; color: #a19486; padding: 15px 0; }
+.kibot-history-message .message-main { min-width: 0; }
+.kibot-history-panel .markdown, .kibot-history-panel .user-message-content { font-size: 13px; line-height: 1.9; }
+.kibot-history-panel .message-assistant .message-main { padding: 14px 16px; background: #fff; border: 1px solid #ebe3db; border-radius: 12px; }
+.kibot-history-panel .message-user .message-main { max-width: 95%; }
+.kibot-history-panel .message-avatar { width: 25px; height: 25px; }
+.kibot-history-panel .user-message-content { border-radius: 12px; padding: 11px 14px; }
+.kibot-history-empty { padding: 30px 16px; color: var(--muted); font-size: 13px; text-align: center; line-height: 1.8; }
+.kibot-history-backdrop { display: none; }
+
+@media (max-width: 1280px) {
+  .kibot-sidebar { width: 218px; flex-basis: 218px; padding-left: 10px; padding-right: 10px; }
+  .kibot-history-panel { width: 360px; }
+  .kibot-workspace .messages-list { padding-left: 24px; padding-right: 24px; }
+  .kibot-shell .workspace-header.kibot-header { padding-left: 25px; padding-right: 25px; }
+}
+@media (max-width: 1100px) {
+  .kibot-history-panel { position: fixed; inset: 0 0 0 auto; width: min(500px, 85vw); z-index: 75; box-shadow: -16px 0 70px #23170e1a; }
+  .kibot-history-backdrop { display: block; position: fixed; inset: 0; z-index: 74; background: #24180f35; }
+}
+@media (max-width: 800px) {
+  .kibot-sidebar { position: fixed; inset: 0 auto 0 0; width: 274px; max-width: calc(100vw - 42px); transform: translateX(-100%); visibility: hidden; z-index: 82; transition: transform .18s, visibility .18s; }
+  .kibot-sidebar.kibot-sidebar-open { transform: translateX(0); visibility: visible; }
+  .kibot-nav-brand > .icon-button { display: inline-flex; }
+  .kibot-mobile-topbar { display: flex; align-items: center; justify-content: space-between; padding: 9px 16px; min-height: 54px; border-bottom: 1px solid #eee8e2; flex-shrink: 0; }
+  .kibot-mobile-topbar .brand { font-size: 17px; }
+  .kibot-shell > .sidebar-backdrop { display: block; position: fixed; inset: 0; background: #21191040; z-index: 81; }
+  .kibot-shell .workspace-header.kibot-header { min-height: 82px; padding: 16px 22px; }
+  .kibot-heading h1 { font-size: 22px; }
+  .kibot-workspace .messages-list { padding: 22px 20px 12px; }
+  .kibot-workspace .composer-area { padding: 10px 16px max(13px, env(safe-area-inset-bottom)); }
+  .kibot-summary-card { padding: 15px 16px 0; }
+  .kibot-summary-card > strong { font-size: 14px; }
+}
+@media (max-width: 520px) {
+  .kibot-history-panel { width: 100%; }
+  .kibot-history-header { padding: 20px; }
+  .kibot-history-scroll { padding: 20px 16px; }
+  .kibot-organized { font-size: 10px; }
+  .kibot-organized .icon { display: none; }
+  .kibot-summary-extract { font-size: 9px; }
+  .kibot-summary-footer { font-size: 10px; }
+  .kibot-shell .composer-controls { gap: 1px; }
+  .nav-dialog-body { padding: 14px; }
+}

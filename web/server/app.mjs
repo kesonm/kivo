@@ -17,6 +17,7 @@ import { discoverOpenAiModels } from './model-discovery.mjs';
 import { createVoiceService } from './voice.mjs';
 import { createWorkService } from './work.mjs';
 import { createWorkRequests } from './work-requests.mjs';
+import { createKibot } from './kibot.mjs';
 
 const scrypt=promisify(scryptCallback);
 const cookieName='cw_session';
@@ -81,6 +82,7 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
   const app=express();const projects=createProjectsOverride??createProjects(config);const limits=new Map();const loginFailures=new Map();
   const workService=createWorkService({store,config,projects,local});
   const workRequests=createWorkRequests(store);
+  const kibot=createKibot({store});
   const runContext=store.runContext??=createRunContext(store);
   let uploadsInProgress=0;
   const qrLogin=createQrLogin(store,config.publicOrigin||'https://kivo.iptnet.xyz');
@@ -327,7 +329,17 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
   app.post('/api/projects/:id/commit',auth,fileAction((p,req)=>p.location==='local'?local.projectCall(p,'commit'):projects.commit(p.id,requiredText(req.body.message??'Save workspace changes','提交说明',200))));
   app.get('/api/projects/:id/threads',auth,(req,res)=>{const p=ownedProject(req);res.json({threads:store.listThreads(p.id)});});
   app.post('/api/projects/:id/threads',auth,(req,res)=>{const p=ownedProject(req);res.status(201).json({thread:store.createThread(p.id,req.user.id,requiredText(req.body.title??'新对话','对话标题',100))});});
-  app.get('/api/history',auth,(req,res)=>{checkedQuery(req,['q']);const q=String(req.query.q??'').slice(0,100);res.json({threads:store.db.prepare('SELECT id,project_id projectId,title,created_at createdAt,updated_at updatedAt FROM threads WHERE user_id=? AND instr(lower(title),lower(?))>0 ORDER BY updated_at DESC LIMIT 100').all(req.user.id,q)});});
+  app.post('/api/kibot',auth,(req,res)=>{
+    if(Object.keys(req.body).length)throw new AppError('打开主会话无需额外参数');
+    rate(req,'kibot-open',120,60_000);res.json(kibot.ensure(req.user.id));
+  });
+  app.get('/api/kibot/timeline',auth,(req,res)=>{
+    checkedQuery(req,['timeZone','limit','before']);rate(req,'kibot-timeline',120,60_000);res.json(kibot.timeline(req.user.id,req.query));
+  });
+  app.get('/api/kibot/history',auth,(req,res)=>{
+    checkedQuery(req,['summaryId','timeZone','limit','cursor']);rate(req,'kibot-history',120,60_000);res.json(kibot.history(req.user.id,req.query));
+  });
+  app.get('/api/history',auth,(req,res)=>{checkedQuery(req,['q']);const q=String(req.query.q??'').slice(0,100);res.json({threads:store.db.prepare('SELECT id,project_id projectId,title,created_at createdAt,updated_at updatedAt FROM threads WHERE user_id=? AND id NOT IN (SELECT thread_id FROM kibot_threads) AND instr(lower(title),lower(?))>0 ORDER BY updated_at DESC LIMIT 100').all(req.user.id,q)});});
   app.get('/api/threads',auth,(req,res)=>{checkedQuery(req,[]);res.json({threads:store.listStandaloneThreads(req.user.id)});});
   app.get('/api/work',auth,(req,res)=>res.json(workService.state(req.user.id)));
   app.get('/api/work/objects',auth,(req,res)=>res.json({objects:workService.graph.listObjects(req.user.id,{query:req.query.q??'',limit:200})}));
@@ -397,7 +409,12 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     if(Object.keys(req.body).some(key=>key!=='title'))throw new AppError('普通对话仅接受标题');
     res.status(201).json({thread:store.createThread(null,req.user.id,requiredText(req.body.title??'新对话','对话标题',100))});
   });
-  app.get('/api/threads/:id',auth,(req,res)=>{const thread=ownedThread(req);res.json({thread,messages:store.getMessages(thread.id),run:store.getLatestRun(thread.id),replyLinks:runContext.links(req.user.id,thread.id)});});
+  app.get('/api/threads/:id',auth,(req,res)=>{
+    const thread=ownedThread(req);
+    if(thread.isPrimary)checkedQuery(req,['timeZone']);
+    res.json({thread,messages:thread.isPrimary?kibot.activeMessages(req.user.id,req.query):store.getMessages(thread.id),
+      run:store.getLatestRun(thread.id),replyLinks:runContext.links(req.user.id,thread.id)});
+  });
   app.get('/api/chat-artifacts/:id',auth,(req,res)=>{
     const artifact=/^[a-f0-9-]{36}$/.test(req.params.id)&&store.getChatArtifact(req.params.id,req.user.id);
     if(!artifact)throw new AppError('文件不存在',404);
@@ -424,6 +441,9 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     let project=thread.projectId===null?null:store.getProject(thread.projectId);
     const multipart=req.is('multipart/form-data');
     const body=multipart?await readChatMultipart(req.body,req.get('content-type')):req.body;
+    if(thread.isPrimary && body.work && (body.work.intent && body.work.intent!=='question' || body.work.taskId || body.work.objectId || body.work.referenceIds?.length)) {
+      throw new AppError('kibot 是主对话，请从最近任务中打开独立任务',409,'kibot_task_separate');
+    }
     const files=multipart?body.files:[];
     const tool=body.tool??(files.length?'analyze':undefined);
     const noPrompt=body.text===undefined||(typeof body.text==='string'&&!body.text.trim());

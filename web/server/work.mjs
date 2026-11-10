@@ -8,6 +8,13 @@ export function createWorkService({ store, config, projects, local }) {
   const graph = store.work ??= createWorkStore({ store });
   const mode = config.workRoutingMode ?? 'shadow';
   function route(userId, conversationId, text, work, { record = true } = {}) {
+    const primary = store.getThread(conversationId);
+    if (primary?.isPrimary && primary.userId === userId) {
+      if (work && (work.intent && work.intent !== 'question' || work.taskId || work.objectId || work.referenceIds?.length)) {
+        throw new AppError('kibot 是主对话，请从最近任务中打开独立任务', 409, 'kibot_task_separate');
+      }
+      work = { ...work, intent: 'question' };
+    }
     let decision;
     try { decision = resolveWorkRoute({ workStore: graph, userId, conversationId, text, work }); }
     catch (error) {

@@ -37,9 +37,22 @@ There is no documented normal inference-key balance API. Show an explicit unavai
 - All admin endpoints enforce admin role and audit reads. Removed quota allocation, user mutations, password-reset and credential-management routes must not be reintroduced.
 - Clearly inform users that site administrators can read conversations, execution history and usage. Never imply administrators can retrieve key plaintext from the webpage.
 
+## kibot primary conversation and display summaries
+
+`kibot_threads` incrementally maps each user to one unique standalone thread. Opening kibot is idempotent, does not merge existing conversations or consume their 500-thread quota, and preserves the title `kibot`. Only that thread has `isPrimary: true`. Ordinary `/api/history` and `/api/threads` lists exclude it; administrator history remains complete. All new endpoints retain authentication, owner scoping and existing CSRF/origin protections for mutations. Selecting a Task or execution target in the primary conversation is rejected; ordinary question routing never grants project access.
+
+- `POST /api/kibot` with `{}` -> `{thread}` initializes or returns the caller's primary thread.
+- `GET /api/kibot/timeline?timeZone=&limit=&before=` -> `{threadId,timeZone,summaries,activeMessageIds,nextBefore,serverNow}`. Summaries are newest first; default 20, maximum 50 per page. Each includes `{id,kind,date,startAt,endAt,title,bullets,messageCount,segmentCount,source:'extractive'}`.
+- `GET /api/kibot/history?summaryId=&timeZone=&limit=&cursor=` -> `{messages,nextCursor,total}`. Default 50, maximum 100 messages; preserve text, attachments, artifacts and citations. Byte bounds can shorten a page but never truncate an original message.
+- `GET /api/threads/:id?timeZone=` for a primary thread returns only its active segment's messages, with the existing run/reply-link fields. The primary display is bounded at 2,000 messages / 16 MiB; overflow returns `kibot_current_large`, never silently drops records.
+
+Use the same validated IANA `timeZone` for primary message reads, timeline and detail requests. The UI sends its browser timezone; omitted timezone defaults to `Asia/Shanghai`. Grouping uses server time. Today's conversations split when a new user message follows at least one hour of inactivity; the last segment remains visible until idle for one hour. Previous days become daily groups. An in-flight reply keeps its request segment visible across midnight until it ends. Cursor and summary identity are scoped to the primary thread and timezone. A segment cursor may become stale when midnight replaces it with a daily group; clients must refresh rather than reinterpret it as another range.
+
+Summaries are bounded extracts of original text, not model-generated completion claims. They introduce no provider call or token charge. They are computed for display without changing original messages or the model context policy: ordinary chat still uses the existing 200-message / 512 KiB runtime limit and fails explicitly when exceeded. There is no automatic context compression or cross-task history merge. Existing realtime voice calls do not persist transcripts in `messages`; only dictation text explicitly sent through the composer participates in these summaries.
+
 ## Ordinary chats, projects and runs
 
-- `GET /api/threads` -> `{threads}` lists only the caller's ordinary chats, ordered by latest activity. No user/project query parameter is accepted.
+- `GET /api/threads` -> `{threads}` lists only the caller's independent ordinary chats, excluding kibot, ordered by latest activity. No user/project query parameter is accepted.
 - `POST /api/threads` with `{title?}` -> 201 `{thread}` creates an ordinary chat. Title defaults to `新对话`. It never creates a project or any project filesystem. Maximum 500 ordinary chats per user; create requests are rate limited.
 - `Thread.projectId` and `Run.projectId` are `string | null`. Null means a genuine standalone chat, not a hidden project. Usage rows retain user, thread and key attribution while `projectId`/`projectName` are null.
 - Existing `/api/projects/:id/threads` lists/creates only that project's chats. Project limits, ownership, UTF-8 file operations, Git diff and checkpoint operations remain unchanged.
