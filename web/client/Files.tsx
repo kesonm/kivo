@@ -5,8 +5,10 @@ import { setDirtyFile } from './navigation';
 import { Empty, ErrorBox, Loading, useDialog, useNotice } from './ui';
 import type { Diff, FileEntry, Project } from './types';
 
-export function Files({ project, revision, locked, onClose }: { project: Project; revision: number; locked: boolean; onClose: () => void }) {
-  const [tab, setTab] = useState<'files' | 'diff'>('files');
+export function Files({ project, revision, locked, onClose, tab, onTabChange: setTab }: {
+  project: Project; revision: number; locked: boolean; onClose: () => void;
+  tab: 'files' | 'diff'; onTabChange: (tab: 'files' | 'diff') => void;
+}) {
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [diff, setDiff] = useState<Diff>({ diff: '', files: [], truncated: false });
   const [path, setPath] = useState('');

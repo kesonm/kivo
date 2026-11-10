@@ -32,6 +32,14 @@ export async function verifyPassword(password,encoded){
 const publicUser=u=>u; // Store already excludes password hashes and credentials.
 const parseCookies=req=>Object.fromEntries((req.headers.cookie??'').split(';').map(v=>v.trim().split('=')).filter(v=>v.length===2));
 
+function verificationCommandFor(value, project) {
+  if (value === undefined) return undefined;
+  if (project?.location !== 'cloud') throw new AppError('验收命令仅用于云端项目');
+  const command = requiredText(value, '验收命令', 1000);
+  if (/[\x00-\x1f\x7f]/.test(value)) throw new AppError('验收命令必须为单行命令');
+  return command;
+}
+
 export function loadConfig(env=process.env){
   const int=(name,fallback,min=1,max=1e9)=>{const n=Number(env[name]??fallback);if(!Number.isInteger(n)||n<min||n>max)throw new Error(`${name} must be an integer between ${min} and ${max}`);return n;};
   const dataDir=path.resolve(env.DATA_DIR??'./data');
@@ -124,6 +132,42 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
   function ownedRun(req){const run=store.getRun(req.params.id);if(!run||run.userId!==req.user.id)throw new AppError('任务不存在',404);return run;}
   function idle(projectId){if(store.getActiveRunForProject(projectId))throw new AppError('项目任务正在执行，请等待完成或停止任务后操作文件',409);}
   const fileAction=fn=>async(req,res)=>{const p=ownedProject(req);await projects.withLock(p.id,async()=>{idle(p.id);res.json(await fn(p,req));});};
+
+  async function startOwnedRun({ thread, project, userId, text, executionText = text, verificationCommand, resumedFromRunId, requestMessageId, tool, model, files = [], attachmentsOnly = false }) {
+    if (project) idle(project.id);
+    if (!attachmentsOnly && !runtime.providerConfigured(userId)) throw new AppError('请先在个人设置中填写你的 OpenAI API 密钥', 409, 'api_key_required');
+    const user = store.getUser(userId);
+    if (!user || user.disabled) throw new AppError('账号已停用', 403);
+    if (store.getActiveRunsForUser(userId).length) throw new AppError('你已有一个任务在运行，请等待完成', 409);
+    if (resumedFromRunId) runtime.assertCapacity?.();
+    const mode = project?.location ?? (project ? 'cloud' : 'chat');
+    const source = mode === 'chat' ? 'hosted' : mode;
+    const run = store.createRun(thread.id, userId, { mode, verificationCommand, resumedFromRunId });
+    let message;
+    try {
+      message = store.appendMessage(thread.id, 'user', text, { uploads: files });
+      store.updateRun(run.id, { requestMessageId: requestMessageId ?? message.id });
+      store.appendRunEvent(run.id, { kind: 'task', source, status: 'started',
+        summary: resumedFromRunId ? '从当前工作区继续' : undefined }, 'task:start');
+      if (attachmentsOnly) {
+        const output = '附件已保存，可以点击文件名下载。当前无法读取这些文件的内容。';
+        store.appendMessage(thread.id, 'assistant', output);
+        store.appendRunEvent(run.id, { kind: 'task', source, status: 'succeeded', summary: '已保存附件' }, 'task:end',
+          { runPatch: { status: 'completed', output } });
+      } else {
+        await runtime.start({ run, thread, project, user, text: executionText, tool, model, files });
+      }
+    } catch (error) {
+      if (message && !resumedFromRunId) store.deleteMessage(message.id);
+      if (store.getRun(run.id)?.status === 'running') {
+        store.appendRunEvent(run.id, { kind: 'task', source, status: 'failed', summary: '启动失败' }, 'task:end',
+          { runPatch: { status: 'failed', error: error.message } });
+      }
+      throw error;
+    }
+    if (thread.title === '新对话') store.updateThread(thread.id, { title: text.slice(0, 50) });
+    return store.getRun(run.id);
+  }
 
   app.get('/healthz',(req,res)=>res.json({ok:true}));
   app.get('/api/session',(req,res)=>{
@@ -296,29 +340,56 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     const prompt=attachmentsOnly?'发送了附件。':files.length&&noPrompt?'请分析这些附件，概括要点并指出值得关注的问题。':body.text;
     const text=requiredText(prompt,'消息',24000);
     if(thread.projectId!==null&&(!project||project.userId!==req.user.id))throw new AppError('项目不存在',404);
-    const start=async()=>{
-      if(project)idle(project.id);
-      if(!attachmentsOnly&&!runtime.providerConfigured(req.user.id))throw new AppError('请先在个人设置中填写你的 OpenAI API 密钥',409,'api_key_required');
-      const user=store.getUser(req.user.id);if(!user||user.disabled)throw new AppError('账号已停用',403);
-      if(store.getActiveRunsForUser(user.id).length>=1)throw new AppError('你已有一个任务在运行，请等待完成',409);
-      const run=store.createRun(thread.id,user.id);
-      let message;
-      try{
-        message=store.appendMessage(thread.id,'user',text,{uploads:files});
-        if(attachmentsOnly){
-          const output='附件已保存，可以点击文件名下载。当前无法读取这些文件的内容。';
-          store.appendMessage(thread.id,'assistant',output);
-          store.updateRun(run.id,{status:'completed',output});
-        }else await runtime.start({run,thread,project,user,text,tool,model,files});
-      }catch(error){
-        if(message)store.deleteMessage(message.id);
-        store.updateRun(run.id,{status:'failed',error:error.message});
-        throw error;
-      }
-      if(thread.title==='新对话')store.updateThread(thread.id,{title:text.slice(0,50)});
-      res.status(202).json({run:store.getRun(run.id)});
-    };
-    if(project)await projects.withLock(project.id,start);else await start();
+    const verificationCommand=verificationCommandFor(body.verificationCommand,project);
+    const start=()=>startOwnedRun({thread,project,userId:req.user.id,text,tool,model,files,attachmentsOnly,verificationCommand});
+    const run=project?await projects.withLock(project.id,start):await start();
+    res.status(202).json({run});
+  });
+  app.get('/api/runs/:id/activity',auth,(req,res)=>{
+    const run=ownedRun(req);
+    checkedQuery(req,['after']);
+    const after=queryNumber(req.query.after,'after',0,0,Number.MAX_SAFE_INTEGER);
+    const page=store.getRunEvents(run.id,{after,limit:101});
+    const events=page.slice(0,100);
+    res.json({run,events,nextAfter:page.length>100?events.at(-1).seq:null});
+  });
+  app.post('/api/runs/:id/resume',auth,async(req,res)=>{
+    rate(req,'turn',30,60_000);
+    const previous=ownedRun(req);
+    if (Object.keys(req.body).some(key=>key!=='text')) throw new AppError('无效的续跑请求');
+    const note=req.body.text===undefined||req.body.text===''?'':requiredText(req.body.text,'补充说明',4000);
+    const project=previous.projectId?store.getProject(previous.projectId):null;
+    if (previous.mode!=='cloud'||previous.status!=='interrupted'||!previous.threadId||project?.location!=='cloud'||project.userId!==req.user.id) {
+      throw new AppError('只有已中断的云端项目任务可以从工作区继续',409,'run_not_resumable');
+    }
+    const run=await projects.withLock(project.id,async()=>{
+      const successor=store.getResumedRun(previous.id);
+      if (successor) return successor;
+      const thread=store.getThread(previous.threadId);
+      if (!thread||thread.userId!==req.user.id||thread.projectId!==project.id) throw new AppError('对话不存在',404);
+      if (store.getLatestRun(thread.id)?.id!==previous.id) throw new AppError('请从该会话的最新任务继续',409,'run_not_latest');
+      const original=store.getRunInput(previous.id);
+      if (original===null&&!note) throw new AppError('上次任务的目标未完整保存，请填写补充说明后继续',409,'run_input_missing');
+      idle(project.id);
+      await runtime.assertCloudRunStopped(previous.id);
+      const files=(await projects.changedFiles(project.id)).slice(0,20);
+      // These paths describe the current working tree, which can also contain user edits.
+      const currentChanges=JSON.stringify(files.map(file=>({path:file.path.slice(0,250),status:file.status})));
+      const verificationCommand=previous.verification?.status==='not_run'?previous.verification.command:undefined;
+      const recorded=store.getRunEvents(previous.id,{limit:300});
+      const observedPaths=[...new Set(recorded.filter(event=>event.kind==='file'&&event.status==='succeeded').flatMap(event=>event.paths??[]))].slice(0,20);
+      const executionText=[
+        'Continue the interrupted task from the current project workspace. Inspect actual files before making changes. Keep any existing user changes. Do not blindly replay previous operations. If a potentially state-changing action may have happened and its outcome is unknown, inspect its outcome first.',
+        original&&'Previous request (context): '+JSON.stringify(original),
+        'Previously reported file edits (possibly incomplete): '+JSON.stringify(observedPaths),
+        'Current Git worktree changes (may predate the task): '+currentChanges,
+        previous.verification&&'Previous independent verification status: '+previous.verification.status+'. kivo runs any carried check separately. Do not replay an interrupted check whose result is unknown.',
+        note&&'Additional user instructions: '+note,
+      ].filter(Boolean).join('\n\n');
+      return startOwnedRun({thread,project,userId:req.user.id,text:note?'继续上次任务：'+note:'继续上次任务',
+        executionText,verificationCommand,resumedFromRunId:previous.id,requestMessageId:original===null?undefined:previous.requestMessageId});
+    });
+    res.status(202).json({run});
   });
   app.post('/api/runs/:id/interrupt',auth,async(req,res)=>{const run=ownedRun(req);await runtime.interrupt(run.id);res.json({ok:true});});
   app.get('/api/runs/:id/approvals',auth,(req,res)=>{const run=ownedRun(req);res.json({approvals:runtime.approvals?.(run.id)??[]});});

@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, symlink, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
+import { PassThrough, Writable } from 'node:stream';
+import { randomBytes } from 'node:crypto';
 import { buildRunnerArgs, measureWorkspace, createRuntime } from '../server/runtime.mjs';
+import { createStore } from '../server/store.mjs';
 
 test('runner arguments enforce isolated, bounded, unprivileged execution', () => {
   const args = buildRunnerArgs({ config: { hostDataDir: '/srv/data', model: 'test-model' }, projectId: 'project-1', containerName: 'run-1' });
@@ -54,5 +58,55 @@ test('pending asynchronous startup occupies the global slot and releases on fail
     assert.rejects(runtime.start(input('second')), error => error.status === 429),
   ]);
   await assert.rejects(runtime.start(input('third')), { code: 'ENOENT' });
+  await runtime.close();
+});
+
+test('cloud verification uses its own exit code and runs once before the container is removed', async t => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'kivo-verification-'));
+  const store = createStore(':memory:', { credentialsKey: randomBytes(32) });
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const user = store.createUser({ username: 'runner', displayName: 'Runner', passwordHash: 'test' });
+  store.setUserApiKey(user.id, 'sk-test-only-verification-0123456789');
+  const project = store.createProject(user.id, 'Verification');
+  const thread = store.createThread(project.id, user.id, 'Test');
+  const run = store.createRun(thread.id, user.id, { mode: 'cloud', verificationCommand: 'npm test' });
+  await mkdir(path.join(dataDir, 'projects', project.id), { recursive: true });
+  const calls = [];
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => {};
+  const publish = payload => child.stdout.write(JSON.stringify(payload) + '\n');
+  child.stdin = new Writable({ write(chunk, encoding, done) {
+    const message = JSON.parse(chunk);
+    const result = { 'thread/start': { thread: { id: 'thread-1' } }, 'turn/start': { turn: { id: 'turn-1' } } }[message.method] ?? {};
+    if (message.id != null) queueMicrotask(() => publish({ id: message.id, result }));
+    done();
+  } });
+  const runtime = createRuntime({
+    store,
+    config: { dataDir, hostDataDir: dataDir, gatewayContainer: 'test-gateway', runnerUid: process.getuid(), runnerGid: process.getgid() },
+    gatewayFactory: () => ({ start: async () => ({}), authorizeRun: () => 'test-task-token', revokeRun: async () => {}, close: async () => {} }),
+    spawnImpl: () => child,
+    execFileImpl: async (bin, args) => {
+      calls.push(args);
+      return { stdout: args[0] === 'exec' ? '1\n' : '' };
+    },
+  });
+  await runtime.start({ run, thread, project, user, text: 'Fix the bug' });
+  const done = new Promise(resolve => runtime.subscribe(run.id, message => { if (message.event === 'done') resolve(message.data); }));
+  publish({ method: 'item/completed', params: { item: { type: 'fileChange', id: 'file-1', status: 'completed', changes: [{ path: '/workspace/src.js' }] } } });
+  publish({ method: 'item/completed', params: { item: { type: 'commandExecution', id: 'shell-1', status: 'completed', exitCode: 0 } } });
+  for (let i = 0; i < 2; i++) publish({ method: 'turn/completed', params: { turn: { status: 'completed' } } });
+  assert.equal((await done).status, 'completed');
+  assert.deepEqual(store.getRun(run.id).verification, { command: 'npm test', status: 'failed', exitCode: 1 });
+  const checks = calls.filter(args => args[0] === 'exec');
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0].at(-1), 'npm test');
+  assert.ok(checks[0].includes('CODEX_GATEWAY_TOKEN='));
+  assert.ok(calls.indexOf(checks[0]) < calls.findIndex(args => args[0] === 'rm'));
+  const events = store.getRunEvents(run.id);
+  assert.deepEqual(events.map(event => [event.kind, event.status]), [['file','succeeded'],['command','succeeded'],['verification','started'],['verification','failed'],['task','succeeded']]);
+  assert.deepEqual(events[0].paths, ['src.js']);
   await runtime.close();
 });

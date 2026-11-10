@@ -11,6 +11,11 @@ const toolProgress = {
   'response.image_generation_call.in_progress': '正在生成图片…',
   'response.code_interpreter_call.in_progress': '正在运行文件分析…',
 };
+const hostedTools = {
+  web_search_call: { tool: 'search', summary: '联网搜索' },
+  image_generation_call: { tool: 'image', summary: '生成图片' },
+  code_interpreter_call: { tool: 'analyze', summary: '运行文件分析' },
+};
 
 /** Replay conversation text, excluding diagnostics and previous file bytes. */
 export function prepareChatRequest(messages, text, config, { tool, files = [] } = {}) {
@@ -65,7 +70,7 @@ function requestLoopback({ port, token, payload, signal }) {
   });
 }
 
-export async function streamChat({ port, token, payload, signal, onText, onImage, onCitation, onTool }) {
+export async function streamChat({ port, token, payload, signal, onText, onImage, onCitation, onTool, onActivity }) {
   const response = await requestLoopback({ port, token, payload, signal });
   if (response.statusCode !== 200) {
     let body = '';
@@ -79,12 +84,25 @@ export async function streamChat({ port, token, payload, signal, onText, onImage
   }
   if (!String(response.headers['content-type'] || '').includes('text/event-stream')) { response.destroy(); throw new GatewayError('模型未返回预期的流式回复。', 502); }
   const partOffsets = new Map(), outputIds = new Map(), seenImages = new Set(), annotations = new Map();
+  const activities = new Map();
   let imageBytes = 0, terminal = null, providerError = null;
   function itemKey(event) {
     const index = event.output_index ?? 0;
     const id = event.item_id ?? event.item?.id;
     if (id != null) outputIds.set(index, id);
     return String(id ?? outputIds.get(index) ?? 'item-' + index);
+  }
+  function trackTool(type, key, status) {
+    if (!onActivity || !Object.hasOwn(hostedTools, type)) return;
+    const activityKey = type + ':' + key;
+    const previous = activities.get(activityKey);
+    if (previous && (previous.status !== 'started' || status === 'started')) return previous.itemId;
+    if (!previous && activities.size >= 128) return;
+    const itemId = previous?.itemId ?? 'hosted-' + (activities.size + 1);
+    const activity = { kind: 'tool', source: 'hosted', ...hostedTools[type], status, itemId };
+    activities.set(activityKey, activity);
+    onActivity(activity);
+    return itemId;
   }
   function emitText(text, key, index, delta = false) {
     if (typeof text !== 'string' || !text) return;
@@ -106,15 +124,35 @@ export async function streamChat({ port, token, payload, signal, onText, onImage
   function emitItem(item, index) {
     if (!item) return;
     const key = itemKey({ item, output_index: index });
+    if (Object.hasOwn(hostedTools, item.type)) {
+      // Only the individual tool call can establish its outcome. Image generation
+      // additionally requires a final image that the chat can actually display.
+      const status = item.status === 'failed' ? 'failed'
+        : item.status === 'incomplete' ? 'unknown'
+        : item.status === 'completed' && item.type !== 'image_generation_call' ? 'succeeded'
+        : 'started';
+      trackTool(item.type, key, status);
+    }
     if (item.type === 'image_generation_call' && typeof item.result === 'string' && !seenImages.has(key)) {
-      if (seenImages.size >= 4 || item.result.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4) throw new GatewayError('生成的图片超过大小限制。', 502);
+      if (seenImages.size >= 4 || item.result.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4) {
+        trackTool(item.type, key, 'failed');
+        throw new GatewayError('生成的图片超过大小限制。', 502);
+      }
       const data = Buffer.from(item.result, 'base64');
       const mimeType = imageType(data);
-      if (!mimeType) throw new GatewayError('图片服务未返回可显示的图片。', 502);
+      if (!mimeType) {
+        trackTool(item.type, key, 'failed');
+        throw new GatewayError('图片服务未返回可显示的图片。', 502);
+      }
       imageBytes += data.length;
-      if (imageBytes > MAX_IMAGE_BYTES) throw new GatewayError('生成的图片超过大小限制。', 502);
+      if (imageBytes > MAX_IMAGE_BYTES) {
+        trackTool(item.type, key, 'failed');
+        throw new GatewayError('生成的图片超过大小限制。', 502);
+      }
       seenImages.add(key);
-      onImage?.({ data, mimeType, name: 'kivo-image-' + seenImages.size + '.' + imageExtension[mimeType] });
+      const activityKey = item.type + ':' + key;
+      onImage?.({ data, mimeType, name: 'kivo-image-' + seenImages.size + '.' + imageExtension[mimeType] }, activities.get(activityKey)?.itemId);
+      if (item.status !== 'failed' && item.status !== 'incomplete') trackTool(item.type, key, 'succeeded');
     }
     if (item.type !== 'message' || item.role !== 'assistant') return;
     for (const [partIndex, part] of (item.content || []).entries()) {
@@ -125,10 +163,16 @@ export async function streamChat({ port, token, payload, signal, onText, onImage
   }
   const parser = makeSseParser(event => {
     if (Object.hasOwn(toolProgress, event.type)) onTool?.(toolProgress[event.type]);
+    const toolEvent = /^response\.(web_search_call|image_generation_call|code_interpreter_call)\.(in_progress|searching|generating|partial_image|interpreting|completed)$/.exec(event.type);
+    if (toolEvent) {
+      const [, type, phase] = toolEvent;
+      trackTool(type, itemKey(event), phase === 'completed' && type !== 'image_generation_call' ? 'succeeded' : 'started');
+    }
     if (event.type === 'response.output_text.delta' || event.type === 'response.refusal.delta') {
       emitText(event.delta, itemKey(event), event.content_index ?? 0, true);
     } else if (event.type === 'response.output_item.added') {
-      itemKey(event);
+      const key = itemKey(event);
+      trackTool(event.item?.type, key, 'started');
     } else if (event.type === 'response.output_item.done') {
       emitItem(event.item, event.output_index);
     } else if (event.type === 'response.output_text.annotation.added') {
@@ -148,6 +192,9 @@ export async function streamChat({ port, token, payload, signal, onText, onImage
     for await (const chunk of response) parser.feed(chunk);
   } finally {
     response.destroy();
+    for (const activity of activities.values()) {
+      if (activity.status === 'started') onActivity({ ...activity, status: 'unknown' });
+    }
     for (const { partKey, url, title, start, end } of annotations.values()) {
       const offset = partOffsets.get(partKey) ?? 0;
       onCitation?.({ url, title, startIndex: offset + start, endIndex: offset + end });

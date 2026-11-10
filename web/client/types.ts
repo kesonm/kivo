@@ -16,6 +16,27 @@ export interface Message {
 export interface Run {
   id: string; threadId: string; projectId?: string | null; status: 'running' | 'completed' | 'failed' | 'interrupted';
   output: string; logs: string[]; createdAt: string; error?: string;
+  mode?: 'cloud' | 'local' | 'chat';
+  interruptReason?: 'restart' | 'user' | 'other';
+  resumedFromRunId?: string;
+  verification?: RunVerification | null;
+}
+export interface RunVerification {
+  command: string;
+  status: 'not_run' | 'running' | 'passed' | 'failed' | 'unknown';
+  exitCode?: number | null;
+}
+export interface RunEvent {
+  seq: number;
+  createdAt: string;
+  kind: 'task' | 'command' | 'file' | 'tool' | 'approval' | 'verification';
+  source: 'cloud' | 'local' | 'hosted';
+  status: 'started' | 'succeeded' | 'failed' | 'denied' | 'interrupted' | 'unknown' | 'awaiting_approval';
+  tool?: string;
+  summary?: string;
+  paths?: string[];
+  exitCode?: number | null;
+  itemId?: string;
 }
 export interface Session { user: User | null; csrfToken: string; providerConfigured: boolean; model?: string; chatModels?: ChatModelOption[] }
 export interface ApiKeyStatus { configured: boolean; last4: string | null; updatedAt: string | null }

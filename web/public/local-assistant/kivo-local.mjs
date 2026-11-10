@@ -17,6 +17,38 @@ export function relativePath(value = '', empty = true) {
   if (typeof value !== 'string' || value.length > 1000 || /[\\:\x00-\x1f]/.test(value) || path.isAbsolute(value) || value.split('/').some(s => s === '..' || s === '.' || sensitive(s)) || (value && value.split('/').some(s => !s)) || (!empty && !value)) throw new Error('只能操作授权目录内的项目文件，不能访问密钥、依赖目录或无效路径。');
   return value;
 }
+
+function itemActivity(state, item, started) {
+  const command = item.type === 'commandExecution';
+  if (!command && item.type !== 'fileChange') return;
+  const activity = command
+    ? { kind: 'command', source: 'local', tool: 'terminal', summary: '运行终端命令' }
+    : { kind: 'file', source: 'local', tool: 'files', summary: '修改项目文件' };
+  if (typeof item.id === 'string' && /^[a-zA-Z0-9_.:-]{1,128}$/.test(item.id) && !item.id.includes(state.token)) activity.itemId = item.id;
+  const exitCode = command && !started && Number.isInteger(item.exitCode) && item.exitCode >= -2147483648 && item.exitCode <= 2147483647 ? item.exitCode : null;
+  if (exitCode !== null) activity.exitCode = exitCode;
+  if (started) activity.status = 'started';
+  else if (item.status === 'declined' || item.status === 'denied') activity.status = 'denied';
+  else if (item.status === 'interrupted' || item.status === 'cancelled') activity.status = 'interrupted';
+  else if (item.status === 'failed' || (exitCode !== null && exitCode !== 0)) activity.status = 'failed';
+  else if (item.status === 'completed' && (!command || exitCode === 0)) activity.status = 'succeeded';
+  else activity.status = 'unknown';
+
+  if (!command && Array.isArray(item.changes)) {
+    const paths = new Set();
+    for (const change of item.changes.slice(0, 50)) {
+      const value = change?.path;
+      if (typeof value !== 'string' || value.length > 4096 || value.includes(state.token)) continue;
+      const relative = (path.isAbsolute(value) ? path.relative(state.cwd, value) : value).split(path.sep).join('/');
+      if (Buffer.byteLength(relative) > 240) continue;
+      try { paths.add(relativePath(relative, false)); } catch { continue; }
+      if (paths.size >= 10) break;
+    }
+    if (paths.size) activity.paths = [...paths];
+  }
+  return activity;
+}
+
 export function createLocalFiles(root, stateDir) {
   async function safe(relative, { missing = false, parents = false } = {}) {
     relativePath(relative);
@@ -211,6 +243,10 @@ export async function startAssistant({ root, stateDir, origin = 'https://kivo.ip
       return;
     }
     const p = m.params || {}, item = p.item || {};
+    if (m.method === 'item/started' || m.method === 'item/completed') {
+      const activity = itemActivity(s, item, m.method === 'item/started');
+      if (activity) emit(s, 'activity', { activity });
+    }
     if (m.method === 'item/agentMessage/delta') { s.streamed.add(p.itemId); emit(s, 'delta', { text: redact(s, p.delta), itemId: p.itemId }); }
     else if (m.method === 'item/started' && item.type === 'commandExecution') emit(s, 'log', { text: '$ ' + redact(s, Array.isArray(item.command) ? item.command.join(' ') : item.command) });
     else if (m.method === 'item/completed') {

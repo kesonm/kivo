@@ -16,6 +16,61 @@ const integer = (value, name, minimum = 0) => {
   if (!Number.isSafeInteger(value) || value < minimum || value > 1_000_000_000_000) throw new AppError(`${name}无效`);
   return value;
 };
+const RUN_MODES = new Set(['cloud', 'local', 'chat']);
+const RUN_INTERRUPT_REASONS = new Set(['restart', 'user', 'other']);
+const VERIFICATION_STATUSES = new Set(['not_run', 'running', 'passed', 'failed', 'unknown']);
+const RUN_EVENT_KINDS = new Set(['task', 'command', 'file', 'tool', 'approval', 'verification']);
+const RUN_EVENT_SOURCES = new Set(['cloud', 'local', 'hosted']);
+const RUN_EVENT_STATUSES = new Set(['started', 'succeeded', 'failed', 'denied', 'interrupted', 'unknown', 'awaiting_approval']);
+const RUN_EVENT_RETENTION = 512;
+const RUN_EVENT_PAGE_LIMIT = 300;
+const RESTART_ERROR = '服务重启，任务已中断；未返回的模型用量记为未知。';
+const isExitCode = value => Number.isInteger(value) && value >= -2147483648 && value <= 2147483647;
+
+function verificationCommand(value) {
+  if (typeof value !== 'string' || !value.trim() || value.length > 1000 || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(value)) {
+    throw new AppError('验收命令必须为一行且不超过 1000 个字符');
+  }
+  return value.trim();
+}
+
+function eventText(value, maxLength) {
+  if (typeof value !== 'string') return '';
+  return value.slice(0, 4096)
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}/gu, '[redacted]')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/=\-]{16,}/giu, 'Bearer [redacted]')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu, ' ')
+    .trim().slice(0, maxLength);
+}
+
+function runEventMetadata(event) {
+  if (!event || !RUN_EVENT_KINDS.has(event.kind) || !RUN_EVENT_SOURCES.has(event.source) || !RUN_EVENT_STATUSES.has(event.status)) {
+    throw new AppError('任务事件格式无效');
+  }
+  const { kind, source, status } = event;
+  const metadata = { kind, source, status };
+  const tool = eventText(event.tool, 100), summary = eventText(event.summary, 500), itemId = eventText(event.itemId, 200);
+  if (tool) metadata.tool = tool;
+  if (summary) metadata.summary = summary;
+  if (itemId) metadata.itemId = itemId;
+  if (isExitCode(event.exitCode)) metadata.exitCode = event.exitCode;
+  if (Array.isArray(event.paths)) {
+    const paths = new Set();
+    let pathBytes = 0;
+    for (const raw of event.paths.slice(0, 40)) {
+      if (typeof raw !== 'string' || raw.length > 400 || /[\\\u0000-\u001f\u007f-\u009f]/u.test(raw)) continue;
+      const relative = eventText(raw, 400).replace(/^(?:\/workspace\/|\.\/)/u, '');
+      if (/^[A-Za-z]:/u.test(relative) || relative.split('/').some(part => !part || part === '.' || part === '..')) continue;
+      if (paths.has(relative)) continue;
+      pathBytes += Buffer.byteLength(relative);
+      if (pathBytes > 2048) break;
+      paths.add(relative);
+      if (paths.size === 20) break;
+    }
+    if (paths.size) metadata.paths = [...paths];
+  }
+  return metadata;
+}
 
 function migrateStandaloneThreads(db) {
   if (!db.prepare('PRAGMA table_info(threads)').all().find(column=>column.name==='project_id')?.notnull) return;
@@ -104,6 +159,22 @@ export function createStore(dbPath,{credentialsKey}={}) {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_project ON runs(project_id) WHERE status='running';
     CREATE INDEX IF NOT EXISTS runs_thread ON runs(thread_id);
+    CREATE TABLE IF NOT EXISTS run_details (
+      run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+      mode TEXT CHECK(mode IN ('cloud','local','chat')),
+      resumed_from_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+      request_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+      verification_command TEXT, verification_status TEXT CHECK(verification_status IN ('not_run','running','passed','failed','unknown')),
+      verification_exit_code INTEGER,
+      interrupt_reason TEXT CHECK(interrupt_reason IN ('restart','user','other'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS run_successor ON run_details(resumed_from_run_id) WHERE resumed_from_run_id IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS run_events (
+      run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL, created_at TEXT NOT NULL, metadata TEXT NOT NULL, dedupe_key TEXT,
+      PRIMARY KEY(run_id,seq)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS run_event_dedupe ON run_events(run_id,dedupe_key) WHERE dedupe_key IS NOT NULL;
     CREATE TABLE IF NOT EXISTS reservations (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), run_id TEXT REFERENCES runs(id),
       amount INTEGER NOT NULL CHECK(amount>0), status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL
@@ -165,8 +236,73 @@ export function createStore(dbPath,{credentialsKey}={}) {
   };
   const projectView = (r) => { if(!r)return null;const local=db.prepare('SELECT device_id,path FROM local_projects WHERE project_id=?').get(r.id);return {id:r.id,userId:r.user_id,name:r.name,createdAt:r.created_at,updatedAt:r.updated_at,...(local?{location:'local',deviceId:local.device_id,localPath:local.path}:{location:'cloud'})}; };
   const threadView = (r) => r ? ({id:r.id,projectId:r.project_id,userId:r.user_id,title:r.title,codexThreadId:r.codex_thread_id,createdAt:r.created_at,updatedAt:r.updated_at}) : null;
+  const runRows = `SELECT r.*,d.mode,d.resumed_from_run_id,d.request_message_id,d.verification_command,
+    d.verification_status,d.verification_exit_code,d.interrupt_reason FROM runs r LEFT JOIN run_details d ON d.run_id=r.id`;
   const runView = (r) => r ? ({id:r.id,threadId:r.thread_id,projectId:r.project_id,userId:r.user_id,status:r.status,
-    output:r.output,logs:JSON.parse(r.logs),error:r.error,createdAt:r.created_at,updatedAt:r.updated_at}) : null;
+    output:r.output,logs:JSON.parse(r.logs),error:r.error,createdAt:r.created_at,updatedAt:r.updated_at,
+    ...(r.mode ? {mode:r.mode} : {}),
+    ...(r.resumed_from_run_id ? {resumedFromRunId:r.resumed_from_run_id} : {}),
+    ...(r.request_message_id ? {requestMessageId:r.request_message_id} : {}),
+    ...(r.verification_command ? {verification:{command:r.verification_command,status:r.verification_status,
+      ...(r.verification_exit_code == null ? {} : {exitCode:r.verification_exit_code})}} : {}),
+    ...(r.interrupt_reason ? {interruptReason:r.interrupt_reason} : {}),
+  }) : null;
+  const runEventView = row => ({seq:row.seq,createdAt:row.created_at,...JSON.parse(row.metadata)});
+
+  function insertRunEvent(runId, event, dedupeKey, createdAt = now()) {
+    const metadata = runEventMetadata(event);
+    const key = typeof dedupeKey === 'string' && dedupeKey ? hash(dedupeKey) : null;
+    if (key && db.prepare('SELECT 1 FROM run_events WHERE run_id=? AND dedupe_key=?').get(runId,key)) return null;
+    const seq = db.prepare('SELECT coalesce(max(seq),0)+1 seq FROM run_events WHERE run_id=?').get(runId).seq;
+    db.prepare('INSERT INTO run_events(run_id,seq,created_at,metadata,dedupe_key) VALUES(?,?,?,?,?)').run(runId,seq,createdAt,JSON.stringify(metadata),key);
+    if (seq > RUN_EVENT_RETENTION) db.prepare('DELETE FROM run_events WHERE run_id=? AND seq<=?').run(runId,seq-RUN_EVENT_RETENTION);
+    return {seq,createdAt,...metadata};
+  }
+
+  function updateRunDetails(run, patch) {
+    let requestMessageId = run.requestMessageId ?? null;
+    let interruptReason = run.interruptReason ?? null;
+    let command = run.verification?.command ?? null;
+    let verificationStatus = run.verification?.status ?? null;
+    let exitCode = run.verification?.exitCode ?? null;
+    if (patch.requestMessageId !== undefined) {
+      requestMessageId = patch.requestMessageId;
+      if (requestMessageId !== null && (typeof requestMessageId !== 'string' || !run.threadId || !db.prepare("SELECT 1 FROM messages WHERE id=? AND thread_id=? AND role='user'").get(requestMessageId,run.threadId))) {
+        throw new AppError('任务的原始请求不存在',404);
+      }
+    }
+    if (patch.interruptReason !== undefined) {
+      if (patch.interruptReason !== null && !RUN_INTERRUPT_REASONS.has(patch.interruptReason)) throw new AppError('任务中断原因无效');
+      interruptReason = patch.interruptReason;
+    }
+    if (patch.verification !== undefined) {
+      const verification = patch.verification;
+      if (!verification || typeof verification !== 'object' || Array.isArray(verification)) throw new AppError('验收记录无效');
+      if (verification.command !== undefined) command = verificationCommand(verification.command);
+      if (!command) throw new AppError('任务尚未配置验收命令');
+      if (verification.status !== undefined && !VERIFICATION_STATUSES.has(verification.status)) throw new AppError('验收状态无效');
+      verificationStatus = verification.status ?? verificationStatus ?? 'not_run';
+      if (verification.exitCode !== undefined) {
+        if (verification.exitCode !== null && !isExitCode(verification.exitCode)) throw new AppError('验收退出码无效');
+        exitCode = verification.exitCode;
+      }
+    }
+    db.prepare(`INSERT INTO run_details(run_id,request_message_id,verification_command,verification_status,verification_exit_code,interrupt_reason)
+      VALUES(?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET request_message_id=excluded.request_message_id,
+      verification_command=excluded.verification_command,verification_status=excluded.verification_status,
+      verification_exit_code=excluded.verification_exit_code,interrupt_reason=excluded.interrupt_reason`)
+      .run(run.id,requestMessageId,command,verificationStatus,exitCode,interruptReason);
+  }
+  function hasRunDetails(patch) {
+    return patch.verification !== undefined || patch.interruptReason !== undefined || patch.requestMessageId !== undefined;
+  }
+  function saveRun(run, patch) {
+    if (hasRunDetails(patch)) updateRunDetails(run,patch);
+    db.prepare('UPDATE runs SET status=?,output=?,logs=?,error=?,updated_at=? WHERE id=?').run(
+      patch.status??run.status,String(patch.output??run.output).slice(0,4_000_000),
+      JSON.stringify((patch.logs??run.logs).slice(-300)),
+      patch.error===undefined?run.error:String(patch.error??'').slice(0,4000),now(),run.id);
+  }
   const audit = (actorId, action, target, detail = '') => db.prepare('INSERT INTO audit VALUES(?,?,?,?,?,?)').run(id(),actorId ?? null,action,target,String(detail).slice(0,2000),now());
   const api = {
     db, close:()=>db.close(),
@@ -299,7 +435,7 @@ export function createStore(dbPath,{credentialsKey}={}) {
         return result;
       };
       const messages=readPage(db.prepare('SELECT * FROM messages WHERE thread_id=? ORDER BY rowid ASC LIMIT ? OFFSET ?'),[threadId,messageLimit,messageOffset],r=>({id:r.id,role:r.role,content:r.content,createdAt:r.created_at}));
-      const runs=readPage(db.prepare('SELECT * FROM runs WHERE thread_id=? ORDER BY rowid ASC LIMIT ? OFFSET ?'),[threadId,runLimit,runOffset],runView);
+      const runs=readPage(db.prepare(`${runRows} WHERE r.thread_id=? ORDER BY r.rowid ASC LIMIT ? OFFSET ?`),[threadId,runLimit,runOffset],runView);
       return {thread,owner:{id:user.id,username:user.username,displayName:user.displayName},project:p?{id:p.id,name:p.name}:null,messages,runs,messagesTotal,runsTotal,messageOffset,runOffset,
         nextMessageOffset:messageOffset+messages.length<messagesTotal?messageOffset+messages.length:null,nextRunOffset:runOffset+runs.length<runsTotal?runOffset+runs.length:null};
     },
@@ -392,21 +528,59 @@ export function createStore(dbPath,{credentialsKey}={}) {
       return messages;
     },
     deleteMessage: messageId=>db.prepare('DELETE FROM messages WHERE id=?').run(messageId),
-    createRun(threadId,userId) {
-      const t=api.getThread(threadId);if(!t||t.userId!==userId)throw new AppError('对话不存在',404);
-      const runId=id(),at=now();
-      try{db.prepare('INSERT INTO runs(id,thread_id,project_id,user_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)').run(runId,threadId,t.projectId,userId,'running',at,at);}
-      catch(e){if(e.message.includes('UNIQUE'))throw new AppError('此对话或项目已有任务正在执行',409);throw e;}
-      return api.getRun(runId);
+    createRun(threadId,userId,{mode,verificationCommand:rawCommand,resumedFromRunId}={}) {
+      if (mode !== undefined && !RUN_MODES.has(mode)) throw new AppError('任务运行环境无效');
+      const command = rawCommand === undefined ? null : verificationCommand(rawCommand);
+      return tx(()=>{
+        const thread = api.getThread(threadId);
+        if (!thread || thread.userId !== userId) throw new AppError('对话不存在',404);
+        if (resumedFromRunId !== undefined) {
+          const previous = typeof resumedFromRunId === 'string' ? api.getRun(resumedFromRunId) : null;
+          if (!previous || previous.userId !== userId || previous.threadId !== threadId) throw new AppError('原任务不存在',404);
+          if (previous.status !== 'interrupted') throw new AppError('只能继续已中断的任务',409);
+          if (api.getResumedRun(resumedFromRunId)) throw new AppError('此任务已继续执行',409,'run_already_resumed');
+        }
+        const runId=id(),at=now();
+        try { db.prepare('INSERT INTO runs(id,thread_id,project_id,user_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)').run(runId,threadId,thread.projectId,userId,'running',at,at); }
+        catch (error) { if (error.message.includes('UNIQUE')) throw new AppError('此对话或项目已有任务正在执行',409); throw error; }
+        if (mode || command || resumedFromRunId) {
+          db.prepare('INSERT INTO run_details(run_id,mode,resumed_from_run_id,verification_command,verification_status) VALUES(?,?,?,?,?)')
+            .run(runId,mode??null,resumedFromRunId??null,command,command ? 'not_run' : null);
+        }
+        return api.getRun(runId);
+      });
     },
-    getRun: runId=>runView(db.prepare('SELECT * FROM runs WHERE id=?').get(runId)),
-    getLatestRun: threadId=>runView(db.prepare('SELECT * FROM runs WHERE thread_id=? ORDER BY rowid DESC LIMIT 1').get(threadId)),
-    getActiveRunForProject: projectId=>runView(db.prepare("SELECT * FROM runs WHERE project_id=? AND status='running'").get(projectId)),
-    getActiveRunsForUser: userId=>db.prepare("SELECT * FROM runs WHERE user_id=? AND status='running'").all(userId).map(runView),
+    getRun: runId=>runView(db.prepare(`${runRows} WHERE r.id=?`).get(runId)),
+    getLatestRun: threadId=>runView(db.prepare(`${runRows} WHERE r.thread_id=? ORDER BY r.rowid DESC LIMIT 1`).get(threadId)),
+    getActiveRunForProject: projectId=>runView(db.prepare(`${runRows} WHERE r.project_id=? AND r.status='running'`).get(projectId)),
+    getActiveRunsForUser: userId=>db.prepare(`${runRows} WHERE r.user_id=? AND r.status='running'`).all(userId).map(runView),
+    getResumedRun: runId=>runView(db.prepare(`${runRows} WHERE d.resumed_from_run_id=?`).get(runId)),
+    getRunInput: runId=>db.prepare(`SELECT m.content FROM run_details d JOIN runs r ON r.id=d.run_id
+      JOIN messages m ON m.id=d.request_message_id AND m.thread_id=r.thread_id AND m.role='user' WHERE d.run_id=?`).get(runId)?.content??null,
     updateRun(runId,patch) {
-      const r=api.getRun(runId);if(!r)throw new AppError('任务不存在',404);
-      db.prepare('UPDATE runs SET status=?,output=?,logs=?,error=?,updated_at=? WHERE id=?').run(patch.status??r.status,String(patch.output??r.output).slice(0,4_000_000),JSON.stringify((patch.logs??r.logs).slice(-300)),patch.error===undefined?r.error:String(patch.error??'').slice(0,4000),now(),runId);
-      return api.getRun(runId);
+      const update = () => {
+        const run=api.getRun(runId);if(!run)throw new AppError('任务不存在',404);
+        saveRun(run,patch);
+        return api.getRun(runId);
+      };
+      return hasRunDetails(patch) ? tx(update) : update();
+    },
+    appendRunEvent(runId,event,dedupeKey,{verification,runPatch}={}) {
+      return tx(()=>{
+        if (!db.prepare('SELECT 1 FROM runs WHERE id=?').get(runId)) throw new AppError('任务不存在',404);
+        const recorded = insertRunEvent(runId,event,dedupeKey);
+        if (recorded && runPatch) saveRun(api.getRun(runId),runPatch);
+        else if (recorded && verification !== undefined) {
+          updateRunDetails(api.getRun(runId),{verification});
+          db.prepare('UPDATE runs SET updated_at=? WHERE id=?').run(recorded.createdAt,runId);
+        }
+        return recorded;
+      });
+    },
+    getRunEvents(runId,{after=0,limit=100}={}) {
+      if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1) throw new AppError('任务事件分页无效');
+      return db.prepare('SELECT seq,created_at,metadata FROM run_events WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?')
+        .all(runId,after,Math.min(limit,RUN_EVENT_PAGE_LIMIT)).map(runEventView);
     },
     reconcileInterruptedRuns() {
       tx(()=>{
@@ -417,7 +591,17 @@ export function createStore(dbPath,{credentialsKey}={}) {
         }
         db.prepare('UPDATE users SET reserved_tokens=0 WHERE reserved_tokens<>0').run();
         db.prepare("UPDATE request_usage SET status='unknown',input_tokens=NULL,output_tokens=NULL,total_tokens=NULL,settled_at=? WHERE status='pending'").run(now());
-        db.prepare("UPDATE runs SET status='interrupted',error='服务重启，任务已中断；未返回的模型用量记为未知。',updated_at=? WHERE status='running'").run(now());
+        const at = now();
+        const interrupted = db.prepare("SELECT r.id,d.mode,d.verification_status FROM runs r JOIN run_details d ON d.run_id=r.id WHERE r.status='running'").all();
+        for (const run of interrupted) {
+          db.prepare(`UPDATE run_details SET interrupt_reason='restart',
+            verification_status=CASE WHEN verification_status='running' THEN 'unknown' ELSE verification_status END,
+            verification_exit_code=CASE WHEN verification_status='running' THEN NULL ELSE verification_exit_code END WHERE run_id=?`).run(run.id);
+          const source = run.mode === 'chat' ? 'hosted' : run.mode ?? 'cloud';
+          if (run.verification_status === 'running') insertRunEvent(run.id,{kind:'verification',source,status:'unknown',summary:'服务重启时验收尚无结果。'},'restart-verification',at);
+          insertRunEvent(run.id,{kind:'task',source,status:'interrupted',summary:RESTART_ERROR},'restart-interrupted',at);
+        }
+        db.prepare("UPDATE runs SET status='interrupted',error=?,updated_at=? WHERE status='running'").run(RESTART_ERROR,at);
       });
     },
     audit,

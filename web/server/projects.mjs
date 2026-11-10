@@ -127,6 +127,11 @@ export function createProjects(config) {
     catch(e){throw new AppError(e.killed?'Git 操作超时':'Git 操作失败，请检查项目仓库是否有效',409);}
     finally{await cleanupGit(id,containerName);}
   }
+  async function changedFiles(id) {
+    const raw=await git(id,['status','--porcelain=v1','-z','--untracked-files=all','--no-renames']);
+    return raw.split('\0').filter(Boolean).map(r=>({path:r.slice(3),status:r.slice(0,2).trim()}));
+  }
+
   return {
     withLock,projectPath,
     async initialize(id,name) {
@@ -154,9 +159,9 @@ export function createProjects(config) {
       await own(p);return {ok:true};
     },
     async deleteFile(id,relative){const p=await safePath(id,relative);await fs.unlink(p);return {ok:true};},
+    changedFiles,
     async diff(id) {
-      const raw=await git(id,['status','--porcelain=v1','-z','--untracked-files=all','--no-renames']);
-      const files=raw.split('\0').filter(Boolean).map(r=>({path:r.slice(3),status:r.slice(0,2).trim()}));
+      const files=await changedFiles(id);
       let diff=await git(id,['diff','--no-ext-diff','--no-textconv','--no-renames','HEAD','--']);let truncated=false;
       for(const file of files.filter(f=>f.status==='??')) {
         if(diff.length>MAX_DIFF){truncated=true;break;}

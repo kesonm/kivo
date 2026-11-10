@@ -12,9 +12,9 @@ async function fixture(t,{startError=false,trustProxy=false,forbidProjectCalls=f
   const store=createStore(':memory:',{credentialsKey:randomBytes(32)});
   const admin=store.createUser({username:'admin',displayName:'Admin',passwordHash:await hashPassword(password),role:'admin'});
   const startCalls=[],projectCalls=[];
-  const runtime={providerConfigured:userId=>Boolean(userId&&store.getApiKeyMetadata(userId).configured),async start(args){startCalls.push(args);if(startError)throw Object.assign(new Error('Runner unavailable'),{status:503});if(startImplementation)await startImplementation(args);},async interrupt(id){store.updateRun(id,{status:'interrupted'});},subscribe:()=>()=>{},close(){}};
+  const runtime={providerConfigured:userId=>Boolean(userId&&store.getApiKeyMetadata(userId).configured),async start(args){startCalls.push(args);if(startError)throw Object.assign(new Error('Runner unavailable'),{status:503});if(startImplementation)await startImplementation(args);},async interrupt(id){store.updateRun(id,{status:'interrupted'});},async assertCloudRunStopped(){},subscribe:()=>()=>{},close(){}};
   const projectCall=name=>{projectCalls.push(name);if(forbidProjectCalls)throw new Error('Ordinary chat must not use project files');};
-  const projects={async initialize(){projectCall('initialize');},async remove(){projectCall('remove');},async withLock(id,fn){projectCall('withLock');return fn();},async tree(){projectCall('tree');return {files:[]};},async readFile(id,p){projectCall('readFile');return {path:p,content:'test'};}};
+  const projects={async initialize(){projectCall('initialize');},async remove(){projectCall('remove');},async withLock(id,fn){projectCall('withLock');return fn();},async tree(){projectCall('tree');return {files:[]};},async readFile(id,p){projectCall('readFile');return {path:p,content:'test'};},async changedFiles(){projectCall('changedFiles');return [{path:'src/actual.js',status:'M'}];}};
   const app=createApp({store,runtime,projects,config:{dataDir:'/tmp/cw-test',publicOrigin:'https://workspace.example',cookieSecure:false,model:'model',trustProxy}});
   const server=app.listen(0,'127.0.0.1');await once(server,'listening');
   t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));store.close();});
@@ -84,6 +84,42 @@ test('every project, thread and run read/write stays scoped to its owner',async 
     ['POST',`/api/threads/${thread.id}/turns`,{text:'Steal'}],['GET',`/api/runs/${run.id}/events`],
     ['POST',`/api/runs/${run.id}/interrupt`,{}]
   ])assert.equal((await bob.request(method,url,body)).status,404,url);
+});
+
+test('cloud timeline survives restart and resume links one new run using the current workspace',async t=>{
+  const {client,store,startCalls}=await fixture(t);
+  const alice=await client(),bob=await client();
+  await register(alice,'alice');await register(bob,'bobby');
+  await alice.request('PUT','/api/account/api-key',{apiKey:keyA});
+  const {thread}=await projectThread(alice);
+  const turnUrl=`/api/threads/${thread.id}/turns`;
+  const first=await alice.request('POST',turnUrl,{text:'Fix the code',verificationCommand:'npm test'});
+  assert.equal(first.status,202);
+  const run=first.data.run,runUrl=`/api/runs/${run.id}`;
+  store.appendRunEvent(run.id,{kind:'file',source:'cloud',tool:'files',status:'succeeded',paths:['src/reported.js']});
+  store.reconcileInterruptedRuns();
+  const timeline=await alice.request('GET',runUrl+'/activity?after=1');
+  assert.equal(timeline.data.run.status,'interrupted');
+  assert.deepEqual(timeline.data.run.verification,{command:'npm test',status:'not_run'});
+  assert.deepEqual(timeline.data.events.map(event=>event.kind),['file','task']);
+  assert.equal((await bob.request('GET',runUrl+'/activity')).status,404);
+  assert.equal((await bob.request('POST',runUrl+'/resume',{})).status,404);
+  const continued=await alice.request('POST',runUrl+'/resume',{text:'Check the affected module'});
+  assert.equal(continued.status,202);
+  assert.equal(continued.data.run.resumedFromRunId,run.id);
+  assert.deepEqual(continued.data.run.verification,{command:'npm test',status:'not_run'});
+  assert.match(startCalls[1].text,/Fix the code/);
+  assert.match(startCalls[1].text,/src\/actual\.js/);
+  assert.match(startCalls[1].text,/Check the affected module/);
+  assert.equal((await alice.request('POST',runUrl+'/resume',{})).data.run.id,continued.data.run.id);
+  assert.equal(startCalls.length,2);
+  store.appendRunEvent(continued.data.run.id,{kind:'verification',source:'cloud',status:'started'},'verification:running',{verification:{status:'running'}});
+  store.reconcileInterruptedRuns();
+  const second=await alice.request('POST',`/api/runs/${continued.data.run.id}/resume`,{});
+  assert.equal(second.status,202);
+  assert.equal(second.data.run.verification,undefined);
+  const ordinary=(await alice.request('POST','/api/threads',{})).data.thread;
+  assert.equal((await alice.request('POST',`/api/threads/${ordinary.id}/turns`,{text:'Hello',verificationCommand:'npm test'})).status,400);
 });
 
 test('administration is read-only and old mutation endpoints do not exist',async t=>{

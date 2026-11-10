@@ -6,8 +6,9 @@ import { Icon, Logo } from './icons';
 import { getDirtyFile } from './navigation';
 import { Files } from './Files';
 import { LocalApprovals } from './Local';
+import { PreviousTask, TaskActivity, VerificationCard, useRunActivity } from './RunActivity';
 import { ErrorBox, Loading, StatusBadge, useDialog, useNotice } from './ui';
-import type { ChatModelOption, ChatTool, Message, Project, Run, Thread, User } from './types';
+import type { ChatModelOption, ChatTool, Message, Project, Run, RunEvent, RunVerification, Thread, User } from './types';
 
 const chatFileCount = 4;
 const chatFileBytes = 8 * 1024 * 1024;
@@ -34,17 +35,21 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [input, setInput] = useState('');
+  const [verificationOpen, setVerificationOpen] = useState(false);
+  const [verificationCommand, setVerificationCommand] = useState('');
   const [selectedTool, setSelectedTool] = useState<Exclude<ChatTool, 'analyze'>>('auto');
   const [selectedModel, setSelectedModel] = useState<string>();
   const [attachments, setAttachments] = useState<File[]>([]);
   const [error, setError] = useState('');
   const [connectionLost, setConnectionLost] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [panelTab, setPanelTab] = useState<'files' | 'diff'>('files');
   const [projectMenu, setProjectMenu] = useState(false);
   const [revision, setRevision] = useState(0);
   const [scrolledUp, setScrolledUp] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const verificationInput = useRef<HTMLInputElement>(null);
   const pinBottom = useRef(true);
   const threadRef = useRef(threadId); threadRef.current = threadId;
   const newlyCreatedThread = useRef<string | null>(null);
@@ -54,6 +59,9 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
   const notify = useNotice(); const ask = useDialog();
   const running = run?.status === 'running';
   const composerBusy = loading || sending || running;
+  const cloudProject = !!project && project.location !== 'local';
+  const resumable = cloudProject && run?.mode === 'cloud' && run.status === 'interrupted';
+  const { events: activity, error: activityError, add: addActivity, refresh: refreshActivity } = useRunActivity(run?.mode ? run.id : undefined);
   const chatTool = attachments.length ? 'analyze' : selectedTool;
   const modelOptions = chatModels ?? (model ? [{ id: model, label: model, description: '' }] : []);
   const chatModel = modelOptions.some(option => option.id === selectedModel) ? selectedModel : modelOptions.find(option => option.id === model)?.id ?? modelOptions[0]?.id;
@@ -75,6 +83,8 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
     pinBottom.current = true; setError(''); setConnectionLost(false);
     if (threadId !== newlyCreatedThread.current) {
       setInput('');
+      setVerificationOpen(false);
+      setVerificationCommand('');
       setAttachments([]);
       setSelectedTool('auto');
     }
@@ -90,6 +100,7 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
     const safely = (handler: (data: any) => void) => (event: MessageEvent) => { if (finished || !mounted.current || threadRef.current !== currentThreadId) return; try { handler(JSON.parse(event.data)); } catch { /* Reconnect will restore the persisted snapshot. */ } };
     source.addEventListener('snapshot', safely((snapshot: Run) => {
       setConnectionLost(false); setRun(old => old?.id === runId ? { ...old, ...snapshot, logs: snapshot.logs || [] } : old);
+      void refreshActivity();
       if (snapshot.status !== 'running' && !finished) {
         finished = true; source.close(); setStopping(false); void loadThread(currentThreadId); void refreshSession().catch(() => undefined); onThreadsChanged(); setRevision(old => old + 1);
       }
@@ -100,11 +111,16 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       else if (data.type === 'tool') setRun(old => old?.id === runId ? { ...old, logs: [...(old.logs || []), String(data.text || '')].slice(-150) } : old);
       else if (data.type === 'status' && data.message) setRun(old => old?.id === runId ? { ...old, logs: [...(old.logs || []), String(data.message)].slice(-150) } : old);
     }));
+    source.addEventListener('activity', safely((event: RunEvent) => addActivity(event)));
+    source.addEventListener('verification', safely((verification: RunVerification) => {
+      setRun(old => old?.id === runId ? { ...old, verification } : old);
+    }));
     source.addEventListener('usage', () => { if (!finished) void refreshSession().catch(() => undefined); });
     source.addEventListener('done', safely(data => {
       if (finished) return; finished = true; source.close(); setConnectionLost(false); setStopping(false);
       setRun(old => old?.id === runId ? { ...old, status: data.status, error: data.message || old.error } : old);
       if (data.status === 'failed' && data.message) notify(data.message, 'error');
+      void refreshActivity();
       void loadThread(currentThreadId); void refreshSession().catch(() => undefined); onThreadsChanged(); setRevision(old => old + 1);
     }));
     source.onopen = () => { if (!finished && mounted.current) setConnectionLost(false); };
@@ -114,15 +130,17 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       void api<{ thread: Thread; messages: Message[]; run: Run | null }>(`/api/threads/${enc(currentThreadId)}`).then(result => {
         if (finished || !mounted.current || threadRef.current !== currentThreadId || result.run?.status === 'running') return;
         finished = true; source.close(); setMessages(result.messages); setRun(result.run); setConnectionLost(false); setStopping(false); setRevision(old => old + 1); void refreshSession().catch(() => undefined); onThreadsChanged();
+        void refreshActivity();
       }).catch(() => undefined);
     };
     return () => { finished = true; source.close(); };
-  }, [run?.id, run?.status, loadThread, onThreadsChanged, refreshSession, notify]);
+  }, [run?.id, run?.status, loadThread, onThreadsChanged, refreshSession, notify, addActivity, refreshActivity]);
   const followOutput = useCallback(() => {
     if (pinBottom.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
   }, []);
-  useEffect(followOutput, [followOutput, messages, run?.output, run?.logs?.length, loading]);
+  useEffect(followOutput, [followOutput, messages, run?.output, run?.logs?.length, activity.length, loading]);
   useEffect(() => { if (textarea.current) { textarea.current.style.height = 'auto'; textarea.current.style.height = `${Math.min(160, textarea.current.scrollHeight)}px`; } }, [input]);
+  useEffect(() => { if (verificationOpen) verificationInput.current?.focus(); }, [verificationOpen]);
 
   function attachFiles(files: File[]) {
     if (!files.length || composerBusy) return;
@@ -155,7 +173,10 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
         if (mounted.current) { threadRef.current = id; newlyCreatedThread.current = id; }
         onThreadCreated(created.thread);
       }
-      let body: { text: string; tool?: ChatTool; model?: string } | FormData = project ? { text } : { text, tool: chatTool, model: chatModel };
+      const check = cloudProject ? verificationCommand.trim() : '';
+      let body: { text: string; tool?: ChatTool; model?: string; verificationCommand?: string } | FormData = project
+        ? { text, ...(check ? { verificationCommand: check } : {}) }
+        : { text, tool: chatTool, model: chatModel };
       if (hasFiles) {
         const form = new FormData();
         form.set('text', text);
@@ -167,7 +188,8 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       const result = await api<{ run: Run }>(`/api/threads/${enc(id)}/turns`, { method: 'POST', body });
       onThreadsChanged();
       if (!mounted.current || threadRef.current !== id) return;
-      setInput(''); setAttachments([]); setSelectedTool('auto'); setRun(result.run);
+      setInput(''); setVerificationOpen(false); setVerificationCommand('');
+      setAttachments([]); setSelectedTool('auto'); setRun(result.run);
       await loadThread(id); void refreshSession().catch(() => undefined);
     } catch (e) { if (mounted.current) setError(messageOf(e)); else onThreadsChanged(); }
     finally { sendingRef.current = false; if (mounted.current) { setSending(false); textarea.current?.focus(); } }
@@ -178,24 +200,70 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
     try { await api(`/api/runs/${enc(run.id)}/interrupt`, { method: 'POST' }); notify('已发送停止请求', 'info'); }
     catch (e) { notify(messageOf(e), 'error'); if (mounted.current) setStopping(false); }
   }
+  async function resume() {
+    if (!run || !resumable || !providerConfigured || sendingRef.current) return;
+    const previous = run;
+    sendingRef.current = true;
+    try {
+      const dirty = getDirtyFile();
+      const result = await ask({
+        title: '从当前工作区继续？',
+        description: 'kivo 会创建一条关联任务，以当前已保存的工作区和已记录的进度为起点。结果未知的操作请先核对。'
+          + (previous.verification?.status === 'not_run' ? ' 已配置且尚未运行的验收命令会带入新任务。' : '')
+          + (dirty ? ` ${dirty} 尚未保存。` : ''),
+        fields: [{ name: 'text', label: '补充说明（选填）', multiline: true, maxLength: 4000, required: false }],
+        confirm: '继续任务',
+      });
+      if (!result || !mounted.current || threadRef.current !== previous.threadId) return;
+      setSending(true);
+      setError('');
+      pinBottom.current = true;
+      const text = result.text?.trim();
+      const next = await api<{ run: Run }>(`/api/runs/${enc(previous.id)}/resume`, { method: 'POST', body: text ? { text } : {} });
+      onThreadsChanged();
+      if (!mounted.current || threadRef.current !== previous.threadId) return;
+      setRun(next.run);
+      await loadThread(previous.threadId);
+      void refreshSession().catch(() => undefined);
+    } catch (error) {
+      if (mounted.current && threadRef.current === previous.threadId) setError(messageOf(error));
+    } finally {
+      sendingRef.current = false;
+      if (mounted.current) setSending(false);
+    }
+  }
   async function copy(content: string) {
     try { await navigator.clipboard.writeText(content); notify('已复制'); }
     catch { notify('无法访问剪贴板，请手动选择文本复制。', 'error'); }
   }
-  async function closePanel() { setPanelOpen(false); }
+  function closePanel() { setPanelOpen(false); setPanelTab('files'); }
+  function openCurrentDiff() { setPanelTab('diff'); setPanelOpen(true); }
   async function changePanel(nextOpen: boolean) {
     if (!project) return;
     if (!nextOpen && panelOpen && getDirtyFile() && !await ask({ title: '关闭未保存的文件？', description: `${getDirtyFile()} 的编辑尚未保存，关闭面板后将丢失。`, confirm: '放弃修改并关闭', danger: true })) return;
-    setPanelOpen(nextOpen);
+    if (nextOpen) setPanelOpen(true);
+    else closePanel();
   }
   const lastAssistant = [...messages].reverse().find(message => message.role === 'assistant');
   const showRunOutput = run && (running || (!!run.output && lastAssistant?.content !== run.output));
-  const emptyConversation = !loading && messages.length === 0 && !running;
+  const emptyConversation = !loading && messages.length === 0 && !run;
   const composer = <div className="composer-area">
     {scrolledUp && !emptyConversation && <button className="scroll-bottom" onClick={() => { pinBottom.current = true; scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: 'smooth' }); }}><Icon name="down" size={16} />回到最新消息</button>}
     {connectionLost && <div className="connection-note"><span className="spinner" />连接已断开，正在自动恢复任务状态…</div>}
     {error && <ErrorBox error={error} onRetry={threadId ? () => void loadThread(threadId, true) : undefined} />}
     {project ? <form className={'composer' + (running ? ' composer-running' : '')} onSubmit={send}>
+      {cloudProject && verificationOpen && <div className="composer-verification" id="project-verification-command">
+        <label htmlFor="verification-command">验收命令（选填）</label>
+        <input ref={verificationInput} id="verification-command" aria-describedby="verification-command-help" value={verificationCommand} onChange={event => setVerificationCommand(event.target.value)}
+          placeholder="例如 npm test" autoComplete="off" spellCheck={false} disabled={composerBusy} maxLength={1000}
+          onKeyDown={event => {
+            if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              textarea.current?.focus();
+            }
+          }} />
+        <small id="verification-command-help">模型结束任务后，kivo 在项目中执行此命令并记录退出码。</small>
+      </div>}
       <div className="composer-input-row">
         <button type="button" className="icon-button composer-attach" title="项目文件、上传与代码差异" aria-label="打开项目文件" onClick={() => void changePanel(true)}><Icon name="plus" size={23} /></button>
         <textarea ref={textarea} value={input} onChange={event => setInput(event.target.value)} placeholder={running ? 'kivo 正在执行任务…' : '有问题，尽管问'} aria-label="发送给 kivo 的消息" disabled={composerBusy} maxLength={24000} rows={1} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
@@ -206,7 +274,10 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
       onRemove={index => setAttachments(files => files.filter((_, i) => i !== index))} tool={chatTool} onTool={setSelectedTool}
       model={chatModel} models={modelOptions} onModel={setSelectedModel} threadId={threadId} providerConfigured={providerConfigured}
       busy={composerBusy} running={running} sending={sending} stopping={stopping} onSend={send} onStop={() => void interrupt()} onOpenLocal={onOpenLocal} />}
-    <div className="composer-footer">{project && <button type="button" className="composer-project" onClick={() => void changePanel(true)} title="查看项目文件"><Icon name="folder" size={13} /><span>{project.name}{project.location === 'local' ? ' · 本地电脑' : ' · 云端'}</span></button>}<span>管理员可查看会话与执行记录</span><span className="composer-shortcut">Shift + Enter 换行</span></div>
+    <div className="composer-footer">{project && <button type="button" className="composer-project" onClick={() => void changePanel(true)} title="查看项目文件"><Icon name="folder" size={13} /><span>{project.name}{project.location === 'local' ? ' · 本地电脑' : ' · 云端'}</span></button>}
+      {cloudProject && <button type="button" className="composer-verification-toggle" aria-expanded={verificationOpen} aria-controls={verificationOpen ? 'project-verification-command' : undefined}
+        onClick={() => setVerificationOpen(open => !open)} disabled={composerBusy}><Icon name="check" size={13} />{verificationCommand.trim() ? '已填写验收命令' : '验收命令'}</button>}
+      <span>管理员可查看会话与执行记录</span><span className="composer-shortcut">Shift + Enter 换行</span></div>
   </div>;
   return <div className={'workspace-body' + (panelOpen ? ' with-panel' : '')}>
     <section className={'chat-panel' + (emptyConversation ? ' chat-panel-empty' : '')}>
@@ -242,16 +313,25 @@ export function Workspace({ project, threadId, onThreadCreated, onThreadsChanged
               </div>
             </article>)}
             {showRunOutput && <article className="chat-message message-assistant"><div className="message-avatar assistant-avatar logo-container"><Logo /></div><div className="message-main"><div className="message-heading"><strong>kivo</strong><StatusBadge status={run.status} /></div>{run.output ? <Markdown content={run.output} /> : <div className="thinking"><span /><span /><span /><small>正在处理你的任务</small></div>}</div></article>}
-            {run && run.logs?.length > 0 && <details className="tool-activity" open={running}><summary><Icon name="terminal" size={15} /><span>执行活动</span><small>{run.logs.length} 条</small><Icon name="down" size={14} /></summary><div className="tool-log">{run.logs.map((log, index) => <div key={index}><span className="tool-log-dot" /><pre>{log}</pre></div>)}</div></details>}
+            {run && <>
+              <VerificationCard run={run} onOpenDiff={project && !running ? openCurrentDiff : undefined} />
+              <TaskActivity key={run.id} run={run} events={activity} error={activityError} refresh={refreshActivity} />
+              {run.resumedFromRunId && <PreviousTask key={run.resumedFromRunId} runId={run.resumedFromRunId} />}
+            </>}
             {running && run && project?.location === 'local' && <LocalApprovals runId={run.id} />}
             {run?.status === 'failed' && <div className="run-outcome"><Icon name="alert" size={16} /><span>{run.error || '任务未能完成，请查看执行活动后重试。'}</span></div>}
-            {run?.status === 'interrupted' && <div className="run-outcome neutral"><Icon name="stop" size={15} /><span>任务已停止。你可以继续发送消息。</span></div>}
+            {run?.status === 'interrupted' && <div className="run-outcome neutral"><Icon name="stop" size={15} />
+              <div><span>{run.interruptReason === 'restart' ? '服务重启，任务已中断。' : run.interruptReason === 'user' ? '你已停止任务。' : '任务已中断。'}</span>
+                {resumable ? <div className="run-resume-actions">
+                  <button type="button" className="button secondary small-button" onClick={() => void resume()} disabled={composerBusy || !providerConfigured}><Icon name="refresh" size={14} />继续任务</button>
+                </div> : <span>你可以继续发送消息。</span>}</div>
+            </div>}
           </div>}
         </div>}
         {composer}
         {emptyConversation && <div className="starter-chips">{(project ? starters : chatStarters).map(starter => <button className="starter-chip" key={starter.title} onClick={() => { setInput(starter.text); textarea.current?.focus(); }}><Icon name={starter.icon} size={16} /><span>{starter.title}</span></button>)}</div>}
       </div>
     </section>
-    {project && panelOpen && <Files project={project} revision={revision} locked={!!running} onClose={() => void closePanel()} />}
+    {project && panelOpen && <Files project={project} revision={revision} locked={!!running} tab={panelTab} onTabChange={setPanelTab} onClose={closePanel} />}
   </div>;
 }

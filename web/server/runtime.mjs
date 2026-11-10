@@ -9,6 +9,16 @@ const execFileAsync = promisify(execFile);
 const OUTPUT_LIMIT = 2 * 1024 * 1024;
 const MAX_LOGS = 240;
 const ID = /^[A-Za-z0-9_-]{1,100}$/;
+const VERIFICATION_TIMEOUT_MS = 90_000;
+
+function executionStatus(item, started) {
+  if (started) return 'started';
+  if (item.status === 'declined') return 'denied';
+  if (item.status === 'interrupted' || item.status === 'cancelled') return 'interrupted';
+  if (item.status === 'failed' || (item.type === 'commandExecution' && Number.isInteger(item.exitCode) && item.exitCode !== 0)) return 'failed';
+  if (item.status === 'completed' && (item.type !== 'commandExecution' || item.exitCode === 0)) return 'succeeded';
+  return 'unknown';
+}
 
 export function buildRunnerArgs({ config, projectId, containerName }) {
   if (!ID.test(projectId) || !ID.test(containerName)) throw new Error('无效的工作区标识。');
@@ -83,7 +93,33 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
     for (const fn of subscribers.get(runId) || []) { try { fn({ event, data }); } catch { /* isolated observer */ } }
   }
   function redact(state, text) {
-    return String(text ?? '').split(state.token).join('[task credential]').slice(0, 8000);
+    const value = String(text ?? '');
+    return (state.token ? value.split(state.token).join('[task credential]') : value).slice(0, 8000);
+  }
+  function activity(state, event, key, options) {
+    const record = store.appendRunEvent(state.run.id, event, key, options);
+    if (record) {
+      emit(state.run.id, 'activity', record);
+      if (options?.verification) emit(state.run.id, 'verification', store.getRun(state.run.id).verification);
+    }
+  }
+  function recordItem(state, item, started) {
+    const itemId = typeof item.id === 'string' && ID.test(item.id) ? item.id : undefined;
+    const kind = item.type === 'commandExecution' ? 'command' : item.type === 'fileChange' ? 'file' : null;
+    if (!kind) return;
+    const status = executionStatus(item, started);
+    const paths = kind === 'file' && Array.isArray(item.changes)
+      ? item.changes.slice(0, 20).map(change => redact(state, change?.path)) : undefined;
+    activity(state, {
+      kind, source: 'cloud', tool: kind === 'command' ? 'terminal' : 'files', status, itemId, paths,
+      exitCode: kind === 'command' ? item.exitCode : undefined,
+    }, itemId && `cloud:${itemId}:${started ? 'start' : 'end'}`);
+  }
+  function recordVerification(state, status, exitCode) {
+    const activityStatus = { running: 'started', passed: 'succeeded', failed: 'failed', unknown: 'unknown' }[status];
+    activity(state, {
+      kind: 'verification', source: 'cloud', tool: 'terminal', status: activityStatus, exitCode, itemId: 'verification',
+    }, 'verification:' + status, { verification: { status, exitCode: exitCode ?? null } });
   }
   function log(state, text) {
     if (state.finishing) return;
@@ -94,6 +130,15 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
   }
   const gateway = gatewayFactory({ store, config, fetchImpl, onStatus: (id, message) => { const s = active.get(id); if (s) log(s, message); } });
   let gatewayReady;
+
+  function assertCapacity() {
+    if (closing) throw new GatewayError('服务正在重启，请稍后重试。', 503);
+    if (active.size + startingProjects.size >= (config.maxConcurrentRuns || 2)) throw new GatewayError('服务器任务已满，请稍后重试。', 429);
+  }
+
+  function revokeGateway(state) {
+    return state.gatewayDrain ??= gateway.revokeRun(state.run.id);
+  }
 
   async function removeContainer(state) {
     try { await execFileImpl('docker', ['rm', '-f', state.containerName], { timeout: 15000, maxBuffer: 16 * 1024 }); }
@@ -115,15 +160,18 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
     await execFileImpl('docker', ['network', 'rm', state.networkName], { timeout: 10000, maxBuffer: 16 * 1024 }).catch(() => {});
   }
 
-  async function finish(state, status, message = '') {
+  async function finish(state, status, message = '', interruptReason = 'other') {
     if (state.finishing) return state.finishing;
     state.endStatus ??= status;
     state.endMessage ??= message;
+    state.interruptReason ??= interruptReason;
     state.finishing = (async () => {
       clearTimeout(state.timeout); clearInterval(state.monitor);
       clearTimeout(state.cleanupRetry);
-      const drained = gateway.revokeRun(state.run.id);
+      const drained = revokeGateway(state);
       state.chatController?.abort();
+      state.verificationController?.abort();
+      if (store.getRun(state.run.id)?.verification?.status === 'running') recordVerification(state, 'unknown');
       for (const pending of state.pending.values()) { clearTimeout(pending.timeout); pending.reject(new Error(message || '任务已结束。')); }
       state.pending.clear();
       // If cancellation races network creation, wait for provisioning to stop
@@ -146,9 +194,11 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       if (state.kind !== 'chat' && state.kind !== 'local') await removeNetwork(state);
       status = state.endStatus;
       message = state.endMessage;
+      let imagesSaved = false;
       if (state.kind === 'chat' && (state.output || state.artifacts.length || state.citations.length)) {
         try {
           store.appendMessage(state.thread.id, 'assistant', state.output, { artifacts: state.artifacts, citations: state.citations });
+          imagesSaved = state.artifacts.length > 0;
         } catch (saveError) {
           if (!state.artifacts.length) throw saveError;
           status = 'failed';
@@ -159,8 +209,20 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       } else if (state.kind !== 'chat' && state.output) {
         store.appendMessage(state.thread.id, 'assistant', state.output);
       }
+      for (const event of state.pendingImageActivity || []) {
+        activity(state, imagesSaved ? event : { ...event, status: 'failed', summary: '未能保存生成的图片' },
+          event.itemId && `hosted:image:${event.itemId}:result`);
+      }
+      for (const approval of state.approvals?.values() || []) {
+        activity(state, { kind: 'approval', source: 'local', tool: approval.kind === 'command' ? 'terminal' : 'files',
+          status: 'interrupted', summary: '任务已结束，授权请求失效', itemId: approval.id }, 'approval:end:' + approval.id);
+      }
       const error = status === 'completed' ? undefined : (message || (status === 'interrupted' ? '任务已停止。' : '任务执行失败。'));
-      store.updateRun(state.run.id, { status, output: state.output, logs: state.logs, error });
+      activity(state, { kind: 'task', source: state.kind === 'chat' ? 'hosted' : state.kind || 'cloud',
+        status: status === 'completed' ? 'succeeded' : status }, 'task:end', {
+        runPatch: { status, output: state.output, logs: state.logs, error,
+          interruptReason: status === 'interrupted' ? state.interruptReason : undefined },
+      });
       if (error) store.appendMessage(state.thread.id, 'system', error);
       emit(state.run.id, 'done', { status, message: error });
       active.delete(state.run.id);
@@ -170,6 +232,33 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       return { pendingCleanup: false };
     })();
     return state.finishing;
+  }
+
+  async function completeCloudTurn(state, status, message) {
+    if (state.turnEnded || state.endStatus) return;
+    state.turnEnded = true;
+    const command = state.run.verification?.command;
+    if (status === 'completed' && command) {
+      await revokeGateway(state);
+      if (state.endStatus) return;
+      state.verificationController = new AbortController();
+      recordVerification(state, 'running');
+      let exitCode;
+      try {
+        // The wrapper reports the in-container command's status. A Docker
+        // error, a timeout or a killed wrapper leaves the check unknown.
+        const result = await execFileImpl('docker', [
+          'exec', '--workdir', '/workspace', '--env', 'CODEX_GATEWAY_TOKEN=', state.containerName,
+          '/bin/bash', '-c', '/bin/bash -c "$1" </dev/null >/dev/null 2>&1; printf "%d\\n" "$?"', 'kivo-verification', command,
+        ], { signal: state.verificationController.signal, timeout: VERIFICATION_TIMEOUT_MS, maxBuffer: 16 * 1024 });
+        if (/^(?:0|[1-9][0-9]{0,2})\n$/.test(result.stdout) && Number(result.stdout) <= 255) exitCode = Number(result.stdout);
+      } catch {
+        // The runner is removed by finish even when the Docker client timed out.
+      }
+      if (state.endStatus) return;
+      recordVerification(state, exitCode === undefined ? 'unknown' : exitCode === 0 ? 'passed' : 'failed', exitCode);
+    }
+    await finish(state, status, message);
   }
 
   function send(state, message) {
@@ -213,6 +302,10 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       // escalation is implemented; unexpected approval requests are denied.
       if (message.method.includes('requestApproval')) send(state, { id: message.id, result: { decision: 'decline' } });
       else send(state, { id: message.id, error: { code: -32601, message: 'This web client does not support this interactive request.' } });
+      if (message.method.includes('requestApproval')) activity(state, {
+        kind: 'approval', source: 'cloud', tool: message.method.includes('fileChange') ? 'files' : 'terminal',
+        status: 'denied', summary: '云端项目不允许提升执行权限',
+      }, 'approval:cloud:' + message.id);
       log(state, `已拒绝当前界面不支持的交互：${message.method}`);
       return;
     }
@@ -221,11 +314,13 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       state.streamedItems.add(params.itemId); appendText(state, params.delta, params.itemId);
     } else if (message.method === 'item/started') {
       const item = params.item || {};
+      recordItem(state, item, true);
       if (item.type === 'commandExecution') log(state, `$ ${Array.isArray(item.command) ? item.command.join(' ') : item.command || '执行项目命令'}`);
       else if (item.type === 'fileChange') log(state, `正在修改文件：${(item.changes || []).map(c => c.path).filter(Boolean).join(', ')}`);
       else if (['mcpToolCall', 'dynamicToolCall'].includes(item.type)) log(state, `工具：${item.tool || item.name || item.type}`);
     } else if (message.method === 'item/completed') {
       const item = params.item || {};
+      recordItem(state, item, false);
       if (item.type === 'agentMessage' && !state.streamedItems.has(item.id)) appendText(state, item.text, item.id);
       if (item.type === 'commandExecution' && item.aggregatedOutput) log(state, item.aggregatedOutput.slice(-6000));
       if (item.type === 'fileChange') log(state, `文件修改${item.status === 'failed' ? '失败' : '已完成'}，可在“代码差异”中查看。`);
@@ -235,7 +330,8 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
     } else if (message.method === 'turn/completed') {
       const turn = params.turn || {};
       const status = turn.status === 'completed' ? 'completed' : turn.status === 'interrupted' ? 'interrupted' : 'failed';
-      void finish(state, status, redact(state, turn.error?.message || state.lastError || ''));
+      void completeCloudTurn(state, status, redact(state, turn.error?.message || state.lastError || ''))
+        .catch(() => finish(state, 'failed', '无法保存任务验收结果。'));
     }
   }
 
@@ -257,7 +353,12 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
         onText: (text, itemId) => appendText(state, text, itemId),
         onImage: artifact => state.artifacts.push(artifact),
         onCitation: citation => state.citations.push(citation),
-        onTool: message => log(state, message) });
+        onTool: message => log(state, message),
+        onActivity: event => {
+          if (state.endStatus) return;
+          if (event.tool === 'image' && event.status === 'succeeded') state.pendingImageActivity.push(event);
+          else activity(state, event, event.itemId && `hosted:${event.tool}:${event.itemId}:${event.status}`);
+        } });
       if (!state.finishing) await finish(state, 'completed');
     } catch (error) {
       if (state.finishing) return;
@@ -274,11 +375,23 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       state.eventSequence = event.sequence; state.lastEvent = Date.now();
       if (event.type === 'delta' && typeof event.text === 'string') appendText(state, redact(state, event.text), String(event.itemId || ''));
       else if (event.type === 'log' && typeof event.text === 'string') log(state, event.text);
+      else if (event.type === 'activity') {
+        const item = event.activity;
+        if (!item || !['command', 'file'].includes(item.kind)
+            || !['started', 'succeeded', 'failed', 'denied', 'interrupted', 'unknown'].includes(item.status)) return;
+        const itemId = typeof item.itemId === 'string' && ID.test(item.itemId) ? item.itemId : undefined;
+        activity(state, { kind: item.kind, source: 'local', tool: item.kind === 'command' ? 'terminal' : 'files',
+          status: item.status, itemId, exitCode: item.kind === 'command' ? item.exitCode : undefined,
+          paths: item.kind === 'file' && Array.isArray(item.paths) ? item.paths.slice(0, 20).map(p => redact(state, p)) : undefined,
+        }, 'local:event:' + event.sequence);
+      }
       else if (event.type === 'thread' && typeof event.threadId === 'string' && ID.test(event.threadId)) store.updateThread(state.thread.id, { codexThreadId: event.threadId });
       else if (event.type === 'approval') {
         const a = event.approval;
         if (!a || !/^[a-f0-9]{24}$/.test(a.id) || !['command', 'file'].includes(a.kind) || state.approvals.size >= 20) return;
         state.approvals.set(a.id, { id: a.id, kind: a.kind, command: redact(state, a.command), reason: redact(state, a.reason), cwd: redact(state, a.cwd), grantRoot: redact(state, a.grantRoot), network: a.network ? { host: String(a.network.host || '').slice(0, 200), protocol: String(a.network.protocol || '').slice(0, 20) } : null });
+        activity(state, { kind: 'approval', source: 'local', tool: a.kind === 'command' ? 'terminal' : 'files',
+          status: 'awaiting_approval', itemId: a.id }, 'approval:start:' + a.id);
         emit(state.run.id, 'message', { type: 'approval' });
       } else if (event.type === 'done') void finish(state, ['completed', 'interrupted'].includes(event.status) ? event.status : 'failed', redact(state, event.error));
     },
@@ -286,6 +399,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
   });
 
   return {
+    assertCapacity,
     providerConfigured: userId => Boolean(userId && store.getApiKeyMetadata(userId)?.configured),
     localResponses(req, res) {
       if (req.headers.origin || req.headers.cookie) { res.statusCode = 403; res.end(); return; }
@@ -294,13 +408,27 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
     approvals(runId) { return [...(active.get(runId)?.approvals?.values() || [])]; },
     async approve(runId, approvalId, decision) {
       const state = active.get(runId);
-      if (!state || state.kind !== 'local' || !state.approvals.has(approvalId) || !['accept', 'decline'].includes(decision)) throw new GatewayError('审批已失效，请刷新。', 409);
+      const approval = state?.approvals?.get(approvalId);
+      if (!state || state.finishing || state.kind !== 'local' || !approval || !['accept', 'decline'].includes(decision)) throw new GatewayError('审批已失效，请刷新。', 409);
       await local.call(state.user.id, state.project.deviceId, 'run.respond', { runId, approvalId, decision });
-      state.approvals.delete(approvalId);
+      if (state.finishing || !state.approvals.delete(approvalId)) return;
       store.audit(state.user.id, 'local.approval.' + decision, runId, approvalId);
+      activity(state, { kind: 'approval', source: 'local', tool: approval.kind === 'command' ? 'terminal' : 'files',
+        status: decision === 'accept' ? 'succeeded' : 'denied',
+        summary: decision === 'accept' ? '已授权本次操作' : '已拒绝本次操作', itemId: approvalId }, 'approval:end:' + approvalId);
+    },
+    async assertCloudRunStopped(runId) {
+      if (!ID.test(runId) || active.has(runId) || startingWaiters.has(runId)) throw new GatewayError('上一次任务尚未安全退出。', 409);
+      try {
+        const result = await execFileImpl('docker', ['inspect', '--format', '{{.State.Running}}', `codex-run-${runId}`], { timeout: 10000, maxBuffer: 16 * 1024 });
+        if (result.stdout.trim() === 'false') return;
+      } catch (error) {
+        if (/No such (object|container)/i.test(`${error.stderr || ''} ${error.message || ''}`)) return;
+      }
+      throw new GatewayError('无法确认上一次任务已安全退出，请稍后重试。', 409);
     },
     async start({ run, thread, project, user, text, tool, model, files = [] }) {
-      if (closing) throw new GatewayError('服务正在重启，请稍后重试。', 503);
+      assertCapacity();
       const account = user?.id && store.getUser(user.id);
       if (!account || account.disabled) throw new GatewayError('账号已停用。', 403);
       if (!store.getUserApiKey(user.id)) throw new GatewayError('请先在个人设置中填写你的 OpenAI API 密钥。', 409);
@@ -308,7 +436,6 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       if (run.userId !== user.id || thread.userId !== user.id || run.threadId !== thread.id
         || (isChat ? run.projectId !== null || thread.projectId !== null : project.userId !== user.id || run.projectId !== project.id || thread.projectId !== project.id)) throw new GatewayError('无权访问此任务。', 403);
       if ((!isChat && !ID.test(project.id)) || !ID.test(run.id) || !ID.test(thread.id)) throw new GatewayError('无效任务标识。');
-      if (active.size + startingProjects.size >= (config.maxConcurrentRuns || 2)) throw new GatewayError('服务器任务已满，请稍后重试。', 429);
       if (startingUsers.has(user.id) || [...active.values()].some(s => s.user.id === user.id)) throw new GatewayError('你已有任务正在运行，请先停止或等待完成。', 409);
       const operationKey = isChat ? `chat:${thread.id}` : project.id;
       if (startingProjects.has(operationKey) || (!isChat && [...active.values()].some(s => s.project?.id === project.id))) throw new GatewayError('该会话或项目已有任务在运行。', 409);
@@ -345,7 +472,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
         if (!gatewayReady) gatewayReady = gateway.start();
         const address = await gatewayReady;
         checkAccount();
-        const state = { kind: 'chat', run, thread, project: null, user, token: '', output: '', logs: [], artifacts: [], citations: [], pending: new Map(), finishing: null, chatController: new AbortController() };
+        const state = { kind: 'chat', run, thread, project: null, user, token: '', output: '', logs: [], artifacts: [], citations: [], pendingImageActivity: [], pending: new Map(), finishing: null, chatController: new AbortController() };
         state.token = gateway.authorizeRun({ id: run.id, userId: user.id,
           chatModel: model, chatTools: payload.tools.map(tool => tool.type),
           chatFiles: files.filter(file => file.kind === 'table').map(file => ({ ...file, name: file.analysisName ?? file.name })) });
@@ -449,7 +576,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
     async interrupt(runId) {
       const state = active.get(runId);
       if (!state) { if (store.getRun(runId)?.status === 'running') cancelledRuns.add(runId); return; }
-      await finish(state, 'interrupted', '任务已由用户停止。');
+      await finish(state, 'interrupted', '任务已由用户停止。', 'user');
     },
     subscribe(runId, listener) {
       let listeners = subscribers.get(runId);
@@ -461,7 +588,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       closing = true;
       for (const id of startingWaiters.keys()) cancelledRuns.add(id);
       const states = [...active.values()];
-      await Promise.allSettled([...states.map(s => finish(s, 'interrupted', '服务重启，任务已停止。')), ...[...startingWaiters.values()].map(waiter => waiter.promise)]);
+      await Promise.allSettled([...states.map(s => finish(s, 'interrupted', '服务重启，任务已停止。', 'restart')), ...[...startingWaiters.values()].map(waiter => waiter.promise)]);
       await Promise.allSettled(states.map(s => s.execution).filter(Boolean));
       await gateway.close();
       local?.close();

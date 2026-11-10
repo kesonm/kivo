@@ -62,18 +62,103 @@ test('legacy schema migration preserves users/projects/history and separates est
   }
   store.db.prepare('INSERT INTO reservations VALUES(?,?,?,?,?,?)').run('r-pending',user.id,run.id,50,'pending',at);
   // Remove only the new tables to recreate a deployed v1 schema; old rows remain.
-  store.db.exec('DROP TABLE request_usage; DROP TABLE user_credentials;');store.close();
+  store.db.exec('DROP TABLE run_events; DROP TABLE run_details; DROP TABLE request_usage; DROP TABLE user_credentials;');store.close();
   store=createStore(filename,{credentialsKey:master});store.reconcileInterruptedRuns();
   assert.equal(store.getUser(user.id).username,'alice');assert.equal(store.getPasswordHash(user.id),'legacy-hash');assert.equal(store.getProject(project.id).name,'Existing project');assert.equal(store.getMessages(thread.id)[0].content,'Keep this history');
   assert.equal(store.getUsage({userId:user.id}).total,3);assert.equal(store.getUser(user.id).usedTokens,30);assert.equal(store.overview().totalUsedTokens,30);
   assert.equal(store.db.prepare('SELECT balance_tokens FROM users WHERE id=?').get(user.id).balance_tokens,777,'legacy balance is retained but never charged');
   assert.equal(store.getRun(run.id).status,'interrupted');assert.equal(store.getApiKeyMetadata(user.id).configured,false);
+  assert.equal(store.getRun(run.id).mode,undefined);assert.deepEqual(store.getRunEvents(run.id),[]);
   assert.equal(store.getUsage({userId:user.id}).totals.unknownRequests,2);store.reconcileInterruptedRuns();assert.equal(store.getUsage({userId:user.id}).total,3);
 });
 
 test('restart marks pending usage unknown without charging anything',t=>{
   const {store,user,thread}=setup(t),run=store.createRun(thread.id,user.id);store.beginUsage(user.id,run.id,{model:'model'});
   store.reconcileInterruptedRuns();assert.equal(store.getRun(run.id).status,'interrupted');assert.equal(store.getUsage({userId:user.id}).usage[0].status,'unknown');assert.equal(store.getUsage({userId:user.id}).usage[0].totalTokens,null);
+});
+
+test('restart preserves pending checks and records checks in flight as unknown exactly once',t=>{
+  const {store,user,thread,project}=setup(t);
+  const active=store.createRun(thread.id,user.id,{mode:'cloud',verificationCommand:'npm test'});
+  const otherProject=store.createProject(user.id,'Another project');
+  const pending=store.createRun(store.createThread(otherProject.id,user.id).id,user.id,{mode:'cloud',verificationCommand:'npm test'});
+  const done=store.createRun(store.createThread(null,user.id).id,user.id,{mode:'chat'});
+  store.updateRun(done.id,{status:'completed'});
+  store.appendRunEvent(active.id,{kind:'verification',source:'cloud',status:'started'},'verification:start',{verification:{status:'running'}});
+  store.reconcileInterruptedRuns();
+  store.reconcileInterruptedRuns();
+  assert.deepEqual(store.getRun(active.id).verification,{command:'npm test',status:'unknown'});
+  assert.equal(store.getRun(active.id).interruptReason,'restart');
+  assert.equal(store.getRun(active.id).status,'interrupted');
+  assert.deepEqual(store.getRun(pending.id).verification,{command:'npm test',status:'not_run'});
+  assert.equal(store.getActiveRunForProject(project.id),null);
+  assert.deepEqual(store.getRunEvents(active.id).map(({seq,kind,status})=>[seq,kind,status]),[
+    [1,'verification','started'],[2,'verification','unknown'],[3,'task','interrupted'],
+  ]);
+  assert.equal(store.getRun(done.id).status,'completed');
+  assert.deepEqual(store.getRunEvents(done.id),[]);
+});
+
+test('resume links only one successor and uses an owned user message for the objective',t=>{
+  const {store,user,admin,thread,project}=setup(t);
+  const old=store.createRun(thread.id,user.id,{mode:'cloud',verificationCommand:'npm test'});
+  const input=store.appendMessage(thread.id,'user','Repair the parser');
+  const wrongRole=store.appendMessage(thread.id,'assistant','not an objective');
+  assert.throws(()=>store.updateRun(old.id,{requestMessageId:wrongRole.id}),e=>e.status===404);
+  assert.equal(store.getRunInput(old.id),null);
+  store.updateRun(old.id,{requestMessageId:input.id});
+  assert.equal(store.getRunInput(old.id),'Repair the parser');
+  store.updateRun(old.id,{status:'interrupted',interruptReason:'restart'});
+  const otherThread=store.createThread(project.id,user.id);
+  const otherOwnerThread=store.createThread(null,admin.id);
+  for (const [attemptThread,owner] of [[otherThread,user],[otherOwnerThread,admin]]) {
+    assert.throws(()=>store.createRun(attemptThread.id,owner.id,{mode:'cloud',resumedFromRunId:old.id}),e=>e.status===404);
+  }
+  const successor=store.createRun(thread.id,user.id,{mode:'cloud',resumedFromRunId:old.id});
+  assert.equal(store.getResumedRun(old.id).id,successor.id);
+  assert.equal(store.getLatestRun(thread.id).resumedFromRunId,old.id);
+  store.updateRun(successor.id,{status:'interrupted',interruptReason:'restart',requestMessageId:input.id});
+  assert.throws(()=>store.createRun(thread.id,user.id,{mode:'cloud',resumedFromRunId:old.id}),e=>e.code==='run_already_resumed');
+  const later=store.createRun(thread.id,user.id,{mode:'cloud',resumedFromRunId:successor.id});
+  assert.equal(store.getResumedRun(successor.id).id,later.id);
+  store.deleteMessage(input.id);
+  assert.equal(store.getRunInput(successor.id),null);
+  assert.equal(store.getRun(successor.id).requestMessageId,undefined);
+});
+
+test('task timeline is sanitized and advances only when a verification update commits',t=>{
+  const {store,user,thread}=setup(t);
+  const run=store.createRun(thread.id,user.id,{mode:'cloud',verificationCommand:'npm test'});
+  const first=store.appendRunEvent(run.id,{
+    kind:'file',source:'cloud',status:'succeeded',summary:`Wrote files with ${keyA}`,
+    paths:['/workspace/src/index.js','./README.md','../../root/secret',' /home/user/private','C:\\secret'],
+    rawOutput:'private provider response',
+  },'file:done');
+  assert.deepEqual(first.paths,['src/index.js','README.md']);
+  assert.equal(first.summary,'Wrote files with [redacted]');
+  assert.equal(first.rawOutput,undefined);
+  const verification={kind:'verification',source:'cloud',status:'failed',exitCode:1};
+  assert.throws(()=>store.appendRunEvent(run.id,verification,'verify:done',{verification:{status:'invalid'}}),/验收状态无效/);
+  assert.deepEqual(store.getRunEvents(run.id),[first]);
+  const second=store.appendRunEvent(run.id,verification,'verify:done',{verification:{status:'failed',exitCode:1}});
+  assert.equal(second.seq,2);
+  assert.deepEqual(store.getRun(run.id).verification,{command:'npm test',status:'failed',exitCode:1});
+  assert.equal(store.appendRunEvent(run.id,verification,'verify:done',{verification:{status:'passed',exitCode:0}}),null);
+  assert.deepEqual(store.getRun(run.id).verification,{command:'npm test',status:'failed',exitCode:1});
+  store.updateRun(run.id,{verification:{status:'unknown',exitCode:null}});
+  assert.deepEqual(store.getRun(run.id).verification,{command:'npm test',status:'unknown'});
+  assert.deepEqual(store.getRunEvents(run.id,{after:first.seq}),[second]);
+});
+
+test('bounded task timelines keep stable cursors when older entries expire',t=>{
+  const {store,user,thread}=setup(t);
+  const run=store.createRun(thread.id,user.id,{mode:'cloud'});
+  for (let i=0;i<513;i++) store.appendRunEvent(run.id,{kind:'tool',source:'cloud',status:'succeeded'});
+  const page=store.getRunEvents(run.id,{limit:1000});
+  assert.equal(page.length,300);
+  assert.equal(page[0].seq,2);
+  assert.equal(store.getRunEvents(run.id,{after:512})[0].seq,513);
+  assert.deepEqual(store.getRunEvents(run.id,{after:513}),[]);
 });
 
 test('admin conversation pagination exposes all history and owner metadata',t=>{
