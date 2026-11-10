@@ -7,8 +7,12 @@ const builtins = [
 ];
 const availableModels = [...builtins, { id: 'gpt-6-sol', label: 'GPT-6 Sol', description: '', efforts: ['none', ...reasoningLevels] }];
 const knownEfforts = new Map(availableModels.map(option => [option.id, option.efforts]));
-const maxModels = 24;
+const maxModels = 500;
 const modelId = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/;
+
+export function isChatModelId(id) {
+  return typeof id === 'string' && modelId.test(id);
+}
 
 class ChatModelError extends Error {
   constructor(message, code = 'chat_catalog_invalid') {
@@ -34,7 +38,7 @@ export function validateChatModelCatalog({ models, defaultModel }) {
   const ids = new Set();
   const validated = models.map(option => {
     const { id, label, description, enabled, efforts, defaultEffort } = option ?? {};
-    if (typeof id !== 'string' || !modelId.test(id) || ids.has(id)) throw new ChatModelError('模型 ID 无效或重复');
+    if (!isChatModelId(id) || ids.has(id)) throw new ChatModelError('模型 ID 无效或重复');
     ids.add(id);
     if (typeof label !== 'string' || !label.trim() || label.length > 60) throw new ChatModelError('模型显示名称须有 1 至 60 个字符');
     if (typeof description !== 'string' || description.length > 160 || typeof enabled !== 'boolean') {

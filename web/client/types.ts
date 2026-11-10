@@ -15,6 +15,7 @@ export interface AdminChatModel extends ChatModelOption {
 export interface AdminChatModelCatalog {
   models: AdminChatModel[]; defaultModel: string; revision: number; knownEfforts: Record<string, ReasoningEffort[]>;
 }
+export interface OpenAiModelList { models: AdminChatModel[]; otherModels: string[] }
 export interface MessageAttachment { name: string; mimeType: string; size: number; id?: string; url?: string; analyzable?: boolean }
 export interface MessageArtifact extends MessageAttachment { id: string; url: string }
 export interface MessageCitation { url: string; title: string; startIndex: number; endIndex: number }
