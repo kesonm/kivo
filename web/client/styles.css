@@ -294,7 +294,7 @@ h1, h2, h3, p { margin-top: 0; }
 .reasoning-heading { display: grid; grid-template-columns: 26px minmax(0, 1fr) 26px; align-items: start; text-align: center; }
 .reasoning-heading > .icon { margin: 4px 0 0 1px; color: var(--muted); }
 .reasoning-selection { display: grid; justify-items: center; gap: 0; min-width: 0; }
-.reasoning-value { color: #4f820f; font-size: 14px; font-weight: 600; line-height: 20px; }
+.reasoning-value { color: var(--reasoning-color); font-size: 14px; font-weight: 600; line-height: 20px; transition: color 200ms ease; }
 .composer-popover button.reasoning-model-link {
   justify-content: center; width: fit-content; min-width: 0; max-width: 100%; min-height: 22px;
   padding: 2px 5px; gap: 2px; border-radius: 7px; color: #686868; font-size: 12px;
@@ -302,25 +302,45 @@ h1, h2, h3, p { margin-top: 0; }
 .reasoning-model-link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-popover button.reasoning-reset { justify-content: center; width: 26px; min-height: 26px; padding: 0; border-radius: 50%; }
 .composer-popover button.reasoning-reset .icon { margin: 0; }
-.reasoning-track {
-  position: relative; height: 25px; margin-top: 7px; border-radius: 999px;
-  --reasoning-fill: calc(13px + (100% - 26px) * var(--reasoning-position));
-  background: linear-gradient(90deg, #77b622 var(--reasoning-fill), #e5e5e5 var(--reasoning-fill));
-  box-shadow: inset 0 0 0 1px #0000000b;
+.reasoning-controls {
+  --reasoning-knob: 24px;
+  --reasoning-radius: calc(var(--reasoning-knob) / 2);
 }
-.reasoning-marks { position: absolute; inset: 0 11px; display: flex; align-items: center; justify-content: space-between; pointer-events: none; }
-.reasoning-marks span { width: 4px; height: 4px; border-radius: 50%; background: #a2a2a2; }
-.reasoning-marks .filled { background: #ffffff91; }
+.reasoning-track {
+  position: relative; height: 32px; margin-top: 5px; border-radius: 999px;
+  --reasoning-stop: calc(var(--reasoning-radius) + (100% - var(--reasoning-knob)) * var(--reasoning-position));
+  --reasoning-snap: 350ms cubic-bezier(.24, 1.32, .44, 1);
+}
+.reasoning-rail { position: absolute; inset: 6px 0; overflow: hidden; border-radius: inherit; background: #e8eaf1; }
+.reasoning-fill {
+  position: absolute; inset: 0; background: var(--reasoning-gradient);
+  clip-path: inset(0 calc(100% - var(--reasoning-stop)) 0 0); transition: clip-path var(--reasoning-snap);
+}
+.reasoning-scale { position: absolute; inset: 0 var(--reasoning-radius); pointer-events: none; }
+.reasoning-mark, .reasoning-thumb { position: absolute; top: 50%; border-radius: 50%; transform: translate(-50%, -50%); }
+.reasoning-mark { width: 4px; height: 4px; background: #9da4b5; transition: background-color 160ms ease; }
+.reasoning-mark.filled { background: #ffffffaa; }
+.reasoning-thumb {
+  left: calc(var(--reasoning-position) * 100%); width: var(--reasoning-knob); height: var(--reasoning-knob);
+  display: grid; place-items: center; border: 1px solid #fff; background: #fff;
+  box-shadow: 0 1px 5px #19233935, 0 0 0 1px #26365016;
+  transition: left var(--reasoning-snap), transform var(--reasoning-snap);
+}
+.reasoning-thumb::after { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--reasoning-color); transition: background-color 200ms ease; }
+.reasoning-controls.is-dragging .reasoning-thumb { transform: translate(-50%, -50%) scale(1.12); transition: transform 140ms ease-out; }
+.reasoning-controls.is-dragging :is(.reasoning-fill, .reasoning-value, .reasoning-mark),
+.reasoning-controls.is-dragging .reasoning-thumb::after { transition: none; }
 .reasoning-track input[type="range"] {
   appearance: none; position: absolute; inset: 0; width: 100%; height: 100%; margin: 0;
-  padding: 0; border: 0; border-radius: inherit; background: transparent; box-shadow: none; cursor: pointer;
+  padding: 0; border: 0; border-radius: inherit; background: transparent; box-shadow: none; cursor: pointer; touch-action: pan-y;
 }
-.reasoning-track input[type="range"]:focus-visible { outline: 2px solid #4f820f; outline-offset: 3px; }
-.reasoning-track input[type="range"]::-webkit-slider-thumb {
-  appearance: none; width: 26px; height: 26px; border-radius: 50%; border: 1px solid #d5d5d5; background: #fff; box-shadow: 0 1px 2px #0002;
-}
-.reasoning-track input[type="range"]::-moz-range-thumb {
-  box-sizing: border-box; width: 26px; height: 26px; border-radius: 50%; border: 1px solid #d5d5d5; background: #fff; box-shadow: 0 1px 2px #0002;
+.reasoning-track input[type="range"]:active { cursor: grabbing; }
+.reasoning-track input[type="range"]:focus-visible { outline: 2px solid var(--reasoning-color); outline-offset: 2px; }
+.reasoning-track input[type="range"]::-webkit-slider-thumb { appearance: none; width: var(--reasoning-knob); height: var(--reasoning-knob); opacity: 0; }
+.reasoning-track input[type="range"]::-moz-range-thumb { width: var(--reasoning-knob); height: var(--reasoning-knob); opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-controls :is(.reasoning-fill, .reasoning-value, .reasoning-mark, .reasoning-thumb),
+  .reasoning-controls.is-dragging .reasoning-thumb, .reasoning-controls .reasoning-thumb::after { transition: none; }
 }
 .reasoning-unavailable { margin: 8px 0 1px; color: var(--muted); font-size: 12px; text-align: center; }
 .composer-model-picker.ultra-active { color: #406900; background: #eff6e4; font-weight: 600; }

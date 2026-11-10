@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useId, useRef, useState, type ClipboardEvent, type CSSProperties, type FormEvent, type KeyboardEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type RefObject } from 'react';
 import { AttachmentChips } from './ChatContent';
 import { Icon } from './icons';
 import { effortLabels } from './reasoning';
+import { ReasoningControls } from './ReasoningControls';
 import { VoiceControls } from './VoiceControls';
 import type { ChatModelOption, ChatTool, ReasoningEffort } from './types';
 
@@ -208,39 +209,8 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
         <button type="button" role="menuitem" onClick={() => { setMenu(null); onOpenLocal(); }}>
           <Icon name="folder" size={17} /><span className="composer-option-title">打开本地文件夹</span><span className="composer-option-description">进入本地项目对话</span>
         </button>
-      </> : menu === 'reasoning' ? <>
-        <div className="reasoning-heading">
-          <Icon name="spark" size={15} />
-          <div className="reasoning-selection">
-            <span className="reasoning-value">{effortLabel}</span>
-            <button type="button" className="reasoning-model-link" aria-haspopup="menu" aria-label={`切换模型，当前为 ${modelLabel}`} onClick={() => setMenu('models')}>
-              <span>{modelLabel}</span><Icon name="chevron" size={12} />
-            </button>
-          </div>
-          <button type="button" className="reasoning-reset" title="恢复默认思考档位" aria-label="恢复默认思考档位"
-            disabled={!ultra && (efforts.length < 2 || effort === model?.defaultEffort)} onClick={() => {
-              onEffort();
-              menuContent.current?.querySelector('input')?.focus();
-            }}>
-            <Icon name="refresh" size={14} />
-          </button>
-        </div>
-        {efforts.length > 0 && <div className="reasoning-track" style={{ '--reasoning-position': efforts.length > 1 ? effortIndex / (efforts.length - 1) : 0 } as CSSProperties}>
-          <div className="reasoning-marks" aria-hidden="true">
-            {efforts.map((level, index) => <span key={level} className={index <= effortIndex ? 'filled' : undefined} />)}
-          </div>
-          <input aria-label="思考程度" aria-valuetext={effortLabel} type="range" min={0} max={Math.max(1, efforts.length - 1)} step={1}
-            value={effortIndex} disabled={efforts.length < 2} onChange={event => onEffort(efforts[Number(event.currentTarget.value)])} />
-        </div>}
-        {!efforts.length && <p className="reasoning-unavailable">此模型未配置思考档位</p>}
-        {model?.supportsUltra && <div className="reasoning-ultra">
-          <button type="button" role="switch" aria-checked={ultra} aria-describedby={`${menuId}-ultra-hint`}
-            className="reasoning-ultra-switch" disabled={!ultraAvailable} onClick={() => onUltra(!ultra)}>
-            <span>Ultra · 多代理</span><span className="reasoning-ultra-toggle" aria-hidden="true" />
-          </button>
-          <p id={`${menuId}-ultra-hint`}>{ultraAvailable ? '仅本条消息，可并行处理任务，可能消耗更多 token。' : 'Ultra 仅用于普通文字聊天。'}</p>
-        </div>}
-      </> : <>
+      </> : menu === 'reasoning' ? <ReasoningControls key={model?.id} model={model} effort={effort} onEffort={onEffort}
+        onPickModel={() => setMenu('models')} ultra={ultra} ultraAvailable={ultraAvailable} onUltra={onUltra} /> : <>
         <button type="button" role="menuitem" className="reasoning-back" onClick={() => setMenu('reasoning')}>
           <Icon name="chevron" size={13} />返回思考程度
         </button>
