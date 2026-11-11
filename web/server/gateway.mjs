@@ -105,11 +105,18 @@ function prepareChatPayload(body, chatTools, applicationTools = new Map()) {
   if (!['auto', 'none'].includes(toolChoice) && !tools.some(tool => tool.type === chosenType)) {
     throw new GatewayError('聊天请求选择了未启用的工具。');
   }
+  const input = prepareChatInput(body.input, applicationTools);
+  for (const tool of tools) if (tool.type === 'image_generation' && tool.action !== undefined) {
+    if (!['auto', 'generate', 'edit'].includes(tool.action)) throw new GatewayError('图片工具操作无效。');
+    if (tool.action === 'edit' && (!Array.isArray(input) || !input.some(item => Array.isArray(item.content)
+      && item.content.some(part => part.type === 'input_image')))) throw new GatewayError('图片编辑需要提供原图。');
+  }
   return {
-    input: prepareChatInput(body.input, applicationTools),
+    input,
     instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
     tools: tools.map(tool => tool.type === 'function' ? applicationTools.get(tool.name)
-      : tool.type === 'code_interpreter' ? { type: tool.type, container: { type: 'auto' } } : { type: tool.type }),
+      : tool.type === 'code_interpreter' ? { type: tool.type, container: { type: 'auto' } }
+        : tool.type === 'image_generation' && tool.action !== undefined ? { type: tool.type, action: tool.action } : { type: tool.type }),
     ...(applicationTools.size ? { parallel_tool_calls: false } : {}),
     tool_choice: tools.length ? (chosenType ? { type: chosenType } : toolChoice) : undefined,
   };

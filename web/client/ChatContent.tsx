@@ -66,9 +66,10 @@ export function Markdown({ content, citations }: { content: string; citations?: 
   >{content}</ReactMarkdown></div>;
 }
 
-export function AttachmentChips({ files, onRemove, disabled }: {
-  files: Pick<MessageAttachment, 'name' | 'id' | 'url' | 'analyzable'>[];
+export function AttachmentChips({ files, onRemove, onEdit, disabled }: {
+  files: (Pick<MessageAttachment, 'name' | 'id' | 'url' | 'analyzable'> & Partial<Pick<MessageAttachment, 'mimeType' | 'size'>>)[];
   onRemove?: (index: number) => void;
+  onEdit?: (image: MessageArtifact) => void;
   disabled?: boolean;
 }) {
   return <ul className="chat-attachments" aria-label="附件">{files.map((file, index) => {
@@ -78,12 +79,13 @@ export function AttachmentChips({ files, onRemove, disabled }: {
       {downloadable ? <a className="chat-attachment-link" href={file.url} download={file.name} aria-label={`下载附件 ${file.name}`} title={file.analyzable === false ? `${file.name}（仅附件）` : file.name}>
         <span>{file.name}</span><Icon name="download" size={13} />
       </a> : <span title={file.name}>{file.name}</span>}
+      {onEdit && downloadable && ['image/png', 'image/jpeg', 'image/webp'].includes(file.mimeType ?? '') && <button type="button" className="icon-button" title="编辑这张图" aria-label={`编辑图片 ${file.name}`} disabled={disabled} onClick={() => onEdit(file as MessageArtifact)}><Icon name="edit" size={14} /></button>}
       {onRemove && <button type="button" className="icon-button" title="移除附件" aria-label={`移除附件 ${file.name}`} disabled={disabled} onClick={() => onRemove(index)}><Icon name="close" size={14} /></button>}
     </li>;
   })}</ul>;
 }
 
-export function ChatImages({ artifacts, onLoad }: { artifacts: MessageArtifact[]; onLoad: () => void }) {
+export function ChatImages({ artifacts, onLoad, onEdit, disabled }: { artifacts: MessageArtifact[]; onLoad: () => void; onEdit?: (image: MessageArtifact) => void; disabled?: boolean }) {
   const images = artifacts.filter(artifact =>
     ['image/png', 'image/jpeg', 'image/webp'].includes(artifact.mimeType) &&
     /^[A-Za-z0-9_-]+$/.test(artifact.id) && artifact.url === `/api/chat-artifacts/${artifact.id}`,
@@ -93,6 +95,7 @@ export function ChatImages({ artifacts, onLoad }: { artifacts: MessageArtifact[]
     <img src={image.url} alt="kivo 生成的图片" loading="lazy" decoding="async" onLoad={onLoad} />
     <figcaption>
       <a href={image.url} download={image.name}><Icon name="download" size={15} />下载图片</a>
+      {onEdit && <button type="button" className="button secondary small-button" disabled={disabled} onClick={() => onEdit(image)}><Icon name="edit" size={15} />继续编辑这张图</button>}
     </figcaption>
   </figure>)}</div>;
 }

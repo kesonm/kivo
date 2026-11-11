@@ -111,13 +111,21 @@ export interface SupervisorTask {
   messageIds?: string[];
   latestRunId?: string | null; updatedAt: string; summary?: string; version?: number;
   result?: string; pendingFollowUp?: boolean;
+  needsAttention?: boolean;
+  attention?: SupervisorAttention | null;
   artifacts?: SupervisorArtifact[];
+}
+export interface SupervisorAttention {
+  key: string;
+  kind: 'failed' | 'result' | 'approval' | 'reconciliation' | 'input';
+  requiresAction: boolean; canDismiss: boolean; acknowledged: boolean;
+  canRetry?: boolean; canAbandon?: boolean;
 }
 export interface SupervisorArtifact {
   id: string; name?: string; title?: string; url?: string; version?: number; status?: string;
 }
 export interface SupervisorSnapshot {
-  tasks: SupervisorTask[]; counts: { queued: number; running: number; attention: number }; revision: string | number;
+  tasks: SupervisorTask[]; counts: { queued: number; running: number; attention: number; actionRequired?: number; updates?: number }; revision: string | number;
 }
 export interface SupervisorDetail {
   task: SupervisorTask;

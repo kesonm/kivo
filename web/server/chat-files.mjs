@@ -70,6 +70,12 @@ export async function readChatMultipart(body, contentType) {
   const files = [], tableNames = new Set(), fields = {};
   let total = 0;
   for (const [key, value] of form) {
+    if (key === 'imageReferenceIds' && typeof value === 'string' && !Object.hasOwn(fields, key)) {
+      try { fields.imageReferenceIds = JSON.parse(value); } catch { throw new AppError('图片引用格式无效', 400); }
+      if (!Array.isArray(fields.imageReferenceIds) || fields.imageReferenceIds.length > MAX_FILES
+        || fields.imageReferenceIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(id))) throw new AppError('图片引用格式无效', 400);
+      continue;
+    }
     if (key === 'work' && typeof value === 'string' && !Object.hasOwn(fields, key)) {
       let selection;
       try { selection = JSON.parse(value); } catch { throw new AppError('普通问答选择无效'); }

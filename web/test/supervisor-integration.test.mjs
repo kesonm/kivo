@@ -106,4 +106,16 @@ test('real HTTP/controller/queue flow delegates an isolated task, stays conversa
   assert.equal(notifications.length, 1);
   assert.match(notifications[0].content, /收紧侧栏/);
   assert.equal(store.getMessages(task.conversationId).filter(message => message.role === 'assistant').length, 1);
+  const action = { eventKey: done.attention.key, expectedVersion: done.version };
+  assert.equal(done.attention.kind, 'result');
+  assert.equal((await bob.request('POST', `/api/kibot/tasks/${task.id}/ack`, action)).status, 404);
+  assert.equal((await bob.request('POST', `/api/kibot/tasks/${task.id}/retry`, action)).status, 404);
+  assert.equal((await alice.request('POST', `/api/kibot/tasks/${task.id}/ack`, { ...action, eventKey: 'stale-event' })).status, 409);
+  assert.equal((await alice.request('POST', `/api/kibot/tasks/${task.id}/retry`, action)).status, 409);
+  const acknowledged = await alice.request('POST', `/api/kibot/tasks/${task.id}/ack`, action);
+  assert.equal(acknowledged.status, 200);
+  assert.equal(acknowledged.data.task.status, 'waiting_input');
+  assert.equal(acknowledged.data.task.needsAttention, false);
+  assert.equal((await alice.request('POST', `/api/kibot/tasks/${task.id}/ack`, action)).status, 200);
+  assert.equal((await alice.request('GET', '/api/kibot/tasks')).data.counts.attention, 0);
 });

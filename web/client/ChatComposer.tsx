@@ -4,10 +4,10 @@ import { Icon } from './icons';
 import { effortLabels } from './reasoning';
 import { ReasoningControls } from './ReasoningControls';
 import { VoiceControls } from './VoiceControls';
-import type { ChatModelOption, ChatTool, ReasoningEffort } from './types';
+import type { ChatModelOption, ChatTool, MessageArtifact, ReasoningEffort } from './types';
 
 const toolOptions = [
-  { id: 'image', icon: 'image', label: '生成图片', description: '把文字描述变成图像', placeholder: '描述你想生成的图片' },
+  { id: 'image', icon: 'image', label: '生成 / 编辑图片', description: '生成新图，或修改上传的图片', placeholder: '描述想生成的图片，或说明要修改哪里' },
   { id: 'search', icon: 'search', label: '联网搜索', description: '查找实时信息和来源', placeholder: '你想从网上查找什么？' },
 ] as const;
 const maxFiles = 4;
@@ -19,6 +19,8 @@ type ComposerProps = {
   attachments: File[];
   onAttach: (files: File[]) => void;
   onRemove: (index: number) => void;
+  editingImage?: MessageArtifact | null;
+  onClearImage?: () => void;
   tool: ChatTool;
   onTool: (tool: Exclude<ChatTool, 'analyze'>) => void;
   model?: ChatModelOption;
@@ -45,7 +47,7 @@ type ComposerProps = {
   placeholder?: string;
 };
 
-export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach, onRemove, tool, onTool, model, models, onModel, effort, onEffort, ultra, ultraAvailable, onUltra, onOpenReasoning, threadId, providerConfigured, busy, running, sending, stopping, onSend, onStop, onOpenLocal, workRestricted = false, voiceRestricted = false, onBusyChange, placeholder }: ComposerProps) {
+export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach, onRemove, editingImage, onClearImage, tool, onTool, model, models, onModel, effort, onEffort, ultra, ultraAvailable, onUltra, onOpenReasoning, threadId, providerConfigured, busy, running, sending, stopping, onSend, onStop, onOpenLocal, workRestricted = false, voiceRestricted = false, onBusyChange, placeholder }: ComposerProps) {
   const [menu, setMenu] = useState<'tools' | 'reasoning' | 'models' | null>(null);
   const [opensBelow, setOpensBelow] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
@@ -160,6 +162,7 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
   return <form ref={form} className={'composer composer-chat' + (running ? ' composer-running' : '') + (attachments.length || selectedTool ? ' composer-with-context' : '')}
     onSubmit={event => { event.preventDefault(); if (!blocked) onSend(event); }} onPaste={paste}>
     {!!attachments.length && <AttachmentChips files={attachments} disabled={blocked} onRemove={onRemove} />}
+    {editingImage && <div className="composer-selection composer-image-reference"><Icon name="image" size={15} /><span title={editingImage.name}>编辑：{editingImage.name}</span><button type="button" className="icon-button" aria-label="取消引用图片" disabled={blocked} onClick={onClearImage}><Icon name="close" size={14} /></button></div>}
     {selectedTool && <div className="composer-selection">
       <button className="composer-tool-chip" type="button" disabled={blocked} aria-label={`移除工具 ${selectedTool.label}`} onClick={() => { onTool('auto'); textarea.current?.focus(); }}>
         <Icon name={selectedTool.icon} size={15} />{selectedTool.label}<Icon name="close" size={13} />
@@ -188,7 +191,7 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
           <span>{ultra ? 'Ultra' : modelLabel}</span><Icon name="down" size={13} />
         </button>
         <VoiceControls disabled={busy || !providerConfigured || nativeVoiceBlocked || workRestricted || voiceRestricted} disabledReason={workRestricted || voiceRestricted ? '请先发送一条普通问答结束工作上下文，再使用语音功能' : nativeVoiceBlocked ? '请在浏览器中使用语音功能' : undefined}
-          hasDraft={hasDraft || running} threadId={threadId} onDictation={insertDictation} onBusyChange={updateVoiceBusy} />
+          hasDraft={hasDraft || !!editingImage || running} threadId={threadId} onDictation={insertDictation} onBusyChange={updateVoiceBusy} />
         {running ? <button type="button" className="send-button stop-button" title="停止任务" aria-label="停止任务" disabled={stopping} onClick={onStop}>
           {stopping ? <span className="spinner" /> : <Icon name="stop" size={17} />}
         </button> : (hasDraft || sending) && <button type="submit" className="send-button" title="发送消息" aria-label="发送消息" disabled={!hasDraft || blocked || !providerConfigured}>
@@ -207,7 +210,7 @@ export function ChatComposer({ draft, setDraft, textarea, attachments, onAttach,
         <button type="button" role="menuitem" disabled={attachments.length >= maxFiles || workRestricted} onClick={() => { setMenu(null); fileInput.current?.click(); }}>
           <Icon name="file" size={17} /><span className="composer-option-title">添加照片和文件</span><span className="composer-option-description">{workRestricted ? '切换到普通问答后使用' : '上传、粘贴与分析附件'}</span>
         </button>
-        {toolOptions.map(option => <button type="button" role="menuitem" key={option.id} disabled={attachments.length > 0} onClick={() => { onTool(option.id); setMenu(null); textarea.current?.focus(); }}>
+        {toolOptions.map(option => <button type="button" role="menuitem" key={option.id} onClick={() => { onTool(option.id); setMenu(null); textarea.current?.focus(); }}>
           <Icon name={option.icon} size={17} /><span className="composer-option-title">{option.label}</span><span className="composer-option-description">{option.description}</span>
           {tool === option.id && <Icon name="check" size={16} />}
         </button>)}

@@ -518,7 +518,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       }
       throw new GatewayError('无法确认上一次任务已安全退出，请稍后重试。', 409);
     },
-    async start({ run, thread, project, user, text, tool, model, reasoningEffort, chatMode, files = [], workContext = null, questionContext = false, onExecutionStart = () => {} }) {
+    async start({ run, thread, project, user, text, tool, model, reasoningEffort, chatMode, files = [], referenceImages = [], workContext = null, questionContext = false, onExecutionStart = () => {} }) {
       // Notify only after a state owns execution and before any engine/provider
       // dispatch. The HTTP layer can then release leases on preflight failures
       // while retaining them when a remote start acknowledgement is uncertain.
@@ -528,6 +528,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       if (!account || account.disabled) throw new GatewayError('账号已停用。', 403);
       if (!store.getUserApiKey(user.id)) throw new GatewayError('请先在个人设置中填写你的 OpenAI API 密钥。', 409);
       const isChat = project == null;
+      if (!isChat && referenceImages.length) throw new GatewayError('图片引用仅用于普通问答。', 415);
       if (workContext) runContext.record(run.id, workContext.packet.manifest.sources, { mode: run.mode, lifecycle: workContext.binding.lifecycle, sessionId: workContext.binding.sessionId, taskId: workContext.binding.taskId, inheritedHistory: workContext.binding.lifecycle === 'continue' });
       else if (!isChat) runContext.record(run.id, [], { mode: run.mode, lifecycle: thread.codexThreadId ? 'continue' : 'new', threadId: thread.codexThreadId, inheritedHistory: !!thread.codexThreadId });
       if (workContext) {
@@ -575,20 +576,20 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
         // Validate the full persisted history before acquiring a provider token.
         // This branch never touches project directories or starts Docker.
         const primary = isPrimary && primaryAssistantFactory ? await primaryAssistantFactory({ userId: user.id, threadId: thread.id,
-          runId: run.id, messageId: store.getRun(run.id).requestMessageId, text, model, chatMode, tool, files }) : null;
+          runId: run.id, messageId: store.getRun(run.id).requestMessageId, text, model, chatMode, tool, files, referenceImages }) : null;
         const messages = primary?.messages ?? workContext?.packet.messages ?? (questionContext
           ? store.work.getQuestionMessages(user.id, thread.id, { maxMessages: CHAT_MAX_MESSAGES, maxBytes: CHAT_MAX_BYTES })
           : store.getMessagesForContext(thread.id, { maxMessages: CHAT_MAX_MESSAGES, maxBytes: CHAT_MAX_BYTES }));
-        if (chatMode === 'ultra' && (files.length || (tool !== undefined && tool !== 'auto'))) {
+        if (chatMode === 'ultra' && (files.length || referenceImages.length || (tool !== undefined && tool !== 'auto'))) {
           throw new GatewayError('Ultra 当前仅支持普通文字聊天。');
         }
         if (!workContext) runContext.record(run.id, messages.filter(item => item.id && ['user','assistant'].includes(item.role) && item.id !== store.getRun(run.id).requestMessageId).map(item => ({ kind: 'message', id: item.id })), { mode: 'chat', lifecycle: 'request' });
-        const payload = prepareChatRequest(messages, text, config, { tool: chatMode === 'ultra' ? undefined : tool, files });
+        const payload = prepareChatRequest(messages, text, config, { tool: chatMode === 'ultra' ? undefined : tool, files, referenceImages });
         // Attachment analysis stays a single request; it cannot replay expiring uploads.
-        const applicationTools = primary && chatMode !== 'ultra' && !files.length && (tool === undefined || tool === 'auto') ? primary.tools ?? [] : [];
+        const applicationTools = primary && chatMode !== 'ultra' && !files.length && !referenceImages.length && (tool === undefined || tool === 'auto') ? primary.tools ?? [] : [];
         const hostedTools = payload.tools.map(tool => tool.type);
         if (primary?.instructions) payload.instructions += '\n\n' + primary.instructions;
-        if (isPrimary && !applicationTools.length) payload.instructions += '\nTask-management tools are unavailable in this mode. Do not claim to create or run tasks; ask the user to use standard automatic text chat for work delegation.';
+        if (isPrimary && !applicationTools.length) payload.instructions += '\nTask-management tools are unavailable in this mode, as are memory tools. This does not disable the hosted tools listed in this request (including image_generation when present). Use enabled hosted tools to fulfill requests directly. Do not claim to create or run independent Tasks. Only if the user specifically requests Task delegation, explain that it requires standard automatic text chat.';
         payload.tools.push(...applicationTools);
         if (!gatewayReady) gatewayReady = gateway.start();
         const address = await gatewayReady;
@@ -601,7 +602,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
         startingProjects.delete(operationKey); startingUsers.delete(userSlot); startingKinds.delete(run.id);
         state.timeout = setTimeout(() => { void finish(state, 'interrupted', '回复达到运行时长上限，已停止。'); }, config.runTimeoutMs || 20 * 60_000);
         state.timeout.unref();
-        log(state, files.length ? '正在准备分析附件…' : '正在生成回复…');
+        log(state, files.some(file => file.kind === 'image') || referenceImages.length ? '正在准备图片…' : files.length ? '正在准备分析附件…' : '正在生成回复…');
         state.execution = executeChat(state, payload, address.port);
         return store.getRun(run.id);
       }

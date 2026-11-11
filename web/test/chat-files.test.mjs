@@ -8,6 +8,20 @@ async function parse(form) {
   return readChatMultipart(Buffer.from(await response.arrayBuffer()), response.headers.get('content-type'));
 }
 
+test('multipart image references remain structured and reject malformed or repeated fields', async () => {
+  const id = 'a2d1ab62-85c5-411a-9c2d-00ca8b5987ca';
+  const form = new FormData();
+  form.set('text', '编辑原图'); form.set('tool', 'image'); form.set('imageReferenceIds', JSON.stringify([id]));
+  const parsed = await parse(form);
+  assert.deepEqual(parsed.imageReferenceIds, [id]); assert.equal(parsed.tool, 'image');
+  for (const value of ['not-json', 'null', JSON.stringify(id), JSON.stringify(['https://example.invalid/image.png']), JSON.stringify(Array(5).fill(id))]) {
+    const invalid = new FormData(); invalid.set('imageReferenceIds', value);
+    await assert.rejects(parse(invalid), error => error.status === 400);
+  }
+  form.append('imageReferenceIds', JSON.stringify([id]));
+  await assert.rejects(parse(form), error => error.status === 400);
+});
+
 test('multipart chat accepts arbitrary filenames and keeps binary bytes out of analysis', async t => {
   const binary = Uint8Array.of(0, 255, 7, 1);
   const form = new FormData();

@@ -17,7 +17,7 @@ export function createWorkRequests(store) {
       owned(userId, conversationId);
       if (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{16,100}$/.test(requestId)) throw new AppError('请刷新网页后重试，当前客户端缺少执行去重标识', 409, 'work_request_id_required');
       const fingerprint = hash(JSON.stringify({ text: body.text, tool: body.tool, model: body.model, reasoningEffort: body.reasoningEffort,
-        mode: body.mode, work: body.work, verificationCommand: body.verificationCommand,
+        mode: body.mode, work: body.work, verificationCommand: body.verificationCommand, imageReferenceIds: body.imageReferenceIds,
         files: files.map(file => ({ name: file.name, content: hash(file.data) })) }));
       const row = db.prepare('SELECT * FROM work_requests WHERE user_id=? AND conversation_id=? AND request_id=?').get(userId, conversationId, requestId);
       if (row) {

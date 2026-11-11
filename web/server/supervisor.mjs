@@ -18,7 +18,6 @@ export const supervisorTools = [
 ];
 const toolNames = new Set(supervisorTools.map(item => item.name));
 const busyStatuses = ['queued', 'dispatching', 'running'];
-const attentionStatuses = ['waiting_input', 'waiting_approval', 'failed', 'needs_reconciliation'];
 const invalid = message => new AppError(message, 400, 'supervisor_invalid');
 const fail = (message, code = 'supervisor_conflict', status = 409) => new AppError(message, status, code);
 const clip = (text, length = 800) => String(text ?? '').replace(/\u0000/g, '').slice(0, length);
@@ -56,6 +55,21 @@ export function createSupervisor({ store, workService, kibot, startTask, stopRun
     job_id TEXT NOT NULL REFERENCES kibot_jobs(id) ON DELETE CASCADE, event_key TEXT NOT NULL,
     message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, created_at TEXT NOT NULL,
     PRIMARY KEY(job_id,event_key)
+  );
+  CREATE TABLE IF NOT EXISTS kibot_task_acknowledgments (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES work_tasks(id) ON DELETE CASCADE,
+    event_key TEXT NOT NULL, created_at TEXT NOT NULL,
+    PRIMARY KEY(user_id,task_id,event_key)
+  );
+  CREATE TABLE IF NOT EXISTS kibot_task_retries (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES work_tasks(id) ON DELETE CASCADE,
+    event_key TEXT NOT NULL, expected_version INTEGER NOT NULL,
+    job_id TEXT NOT NULL REFERENCES kibot_jobs(id) ON DELETE CASCADE,
+    source_job_id TEXT NOT NULL REFERENCES kibot_jobs(id),
+    source_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL, PRIMARY KEY(user_id,task_id,event_key)
   );`);
   let pumping = null, timer = null, closed = false, transaction = 0;
   const tx = fn => {
@@ -179,12 +193,99 @@ export function createSupervisor({ store, workService, kibot, startTask, stopRun
     const unknown = results.some(result => result.status === 'rejected');
     if (unknown) db.prepare("UPDATE kibot_jobs SET status='needs_reconciliation',error=?,updated_at=? WHERE task_id=? AND status IN ('running','dispatching')")
       .run('停止结果尚未确认，请打开任务核对。', now(), taskId);
-    const unconfirmed = unknown || !!db.prepare("SELECT 1 FROM kibot_jobs WHERE user_id=? AND task_id=? AND status='needs_reconciliation'").get(userId, taskId);
+    const unconfirmed = unknown || db.prepare("SELECT * FROM kibot_jobs WHERE user_id=? AND task_id=? AND status='needs_reconciliation'")
+      .all(userId, taskId).some(job => !confirmedStopped(job));
     return { task: view(userId, taskId), ...(unconfirmed ? { warning: '已撤销后续安排；先前执行是否停止及其外部结果仍需核对。' } : {}) };
   }
   async function stop(userId, taskId, { expectedVersion, reason } = {}) {
     const runIds = tx(() => prepareStop(userId, taskId, expectedVersion, reason));
     return finishStop(userId, taskId, runIds);
+  }
+  function actionInput(input = {}) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw invalid('提醒操作参数无效');
+    const { eventKey, expectedVersion } = input;
+    const key = text(eventKey, '提醒标识', 200);
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) throw invalid('任务版本无效');
+    return { eventKey: key, expectedVersion };
+  }
+  function currentEvent(userId, taskId, { eventKey, expectedVersion }) {
+    const task = view(userId, text(taskId, '任务标识', 200));
+    if (task.version !== expectedVersion || task.attention?.key !== eventKey) {
+      throw fail('任务或提醒已更新，请刷新后重新操作', 'supervisor_attention_conflict');
+    }
+    return task;
+  }
+  function acknowledge(userId, taskId, input) {
+    account(userId);
+    const action = actionInput(input);
+    return tx(() => {
+      const task = currentEvent(userId, taskId, action);
+      if (!task.attention.canDismiss) throw fail('此项仍需要处理，不能仅确认提醒', 'supervisor_attention_required');
+      const saved = db.prepare('INSERT OR IGNORE INTO kibot_task_acknowledgments VALUES(?,?,?,?)')
+        .run(userId, task.id, action.eventKey, now());
+      if (saved.changes) store.audit(userId, 'kibot.task.acknowledged', task.id, JSON.stringify({ eventKey: action.eventKey }));
+      return { task: view(userId, task.id) };
+    });
+  }
+  function retry(userId, taskId, input) {
+    enabled(userId);
+    const action = actionInput(input);
+    return tx(() => {
+      const { job, task } = ownedJob(userId, text(taskId, '任务标识', 200));
+      const prior = db.prepare('SELECT * FROM kibot_task_retries WHERE user_id=? AND task_id=? AND event_key=?')
+        .get(userId, task.id, action.eventKey);
+      // Repeated clicks while this exact retry is outstanding never create a
+      // second request. Once another result exists, the old event is stale.
+      if (prior && prior.expected_version === action.expectedVersion && task.version === action.expectedVersion
+        && prior.job_id === job?.id && busyStatuses.includes(job.status) && task.status !== 'cancelled') {
+        return { task: view(userId, task.id), queued: true, replayed: true };
+      }
+      const current = currentEvent(userId, task.id, action);
+      if (!current.attention.canRetry) throw fail('此任务当前不能重试，请打开任务核对实际状态', 'supervisor_task_unavailable');
+      assertKnown(userId, task.id);
+      queueLimit(userId);
+      const primary = kibot.getThread(userId), thread = store.getThread(job.conversation_id);
+      if (!thread || thread.userId !== userId) throw fail('任务对话不可访问', 'supervisor_forbidden', 403);
+      const messageId = randomUUID(), at = now();
+      const content = `重试任务「${clip(task.goal, 300)}」。先核对已有执行结果，再继续尚未完成的部分，保持原任务授权范围。`;
+      db.prepare("INSERT INTO messages(id,thread_id,role,content,created_at) VALUES(?,?,'user',?,?)")
+        .run(messageId, primary.id, content, at);
+      db.prepare('INSERT INTO chat_message_metadata(message_id,metadata) VALUES(?,?)')
+        .run(messageId, JSON.stringify({ supervisorTaskId: task.id, supervisorAction: 'retry', supervisorEventKey: action.eventKey }));
+      db.prepare('UPDATE threads SET updated_at=? WHERE id=?').run(at, primary.id);
+      // A real button action is a user request, not an invented assistant turn
+      // or Run. Preserve the full authorized prompt, including long task goals.
+      const retried = db.prepare('SELECT source_job_id FROM kibot_task_retries WHERE job_id=?').get(job.id);
+      const source = retried ? db.prepare('SELECT * FROM kibot_jobs WHERE id=? AND user_id=? AND task_id=?')
+        .get(retried.source_job_id, userId, task.id) : job;
+      const requestMessageId = source?.run_id && store.getRun(source.run_id)?.requestMessageId;
+      const original = source?.prompt || (requestMessageId && store.getMessage(requestMessageId)?.content);
+      const prompt = `${content}\n\n上次执行要求：\n${original || task.goal}`;
+      const jobId = enqueue({ userId, primary, messageId, task, thread, prompt, model: job.model });
+      db.prepare('INSERT INTO kibot_task_retries VALUES(?,?,?,?,?,?,?,?)')
+        .run(userId, task.id, action.eventKey, action.expectedVersion, jobId, source?.id ?? job.id, messageId, at);
+      return { task: view(userId, task.id), queued: true };
+    });
+  }
+  function attentionFor(userId, task, { job = null, run = null, queueStatus, approvals = [], active = false }) {
+    let kind = null;
+    if (queueStatus === 'needs_reconciliation' || task.status === 'needs_reconciliation') kind = 'reconciliation';
+    else if (approvals.length || task.status === 'waiting_approval') kind = 'approval';
+    else if (!busyStatuses.includes(queueStatus) && !['cancelled', 'succeeded'].includes(task.status)) {
+      if (queueStatus === 'failed' || task.status === 'failed') kind = 'failed';
+      else if (task.status === 'waiting_input') kind = run?.status === 'completed' ? 'result' : 'input';
+      else if (queueStatus === 'completed') kind = 'result';
+    }
+    if (!kind) return { attention: null, needsAttention: false };
+    const key = createHash('sha256').update(JSON.stringify([task.id, task.version, job?.id ?? null, run?.id ?? null,
+      kind, approvals.map(item => item.id).sort()])).digest('hex');
+    const canDismiss = kind === 'failed' || kind === 'result';
+    const acknowledged = canDismiss && !!db.prepare('SELECT 1 FROM kibot_task_acknowledgments WHERE user_id=? AND task_id=? AND event_key=?')
+      .get(userId, task.id, key);
+    const canAbandon = kind === 'failed' && !active && task.status !== 'cancelled';
+    const canRetry = canAbandon && !!job && job.task_version === task.version && task.status !== 'running';
+    return { attention: { key, kind, requiresAction: !canDismiss, canDismiss, acknowledged, canRetry, canAbandon },
+      needsAttention: !acknowledged };
   }
   function view(userId, taskId) {
     const { job, task } = ownedJob(userId, taskId);
@@ -204,15 +305,23 @@ export function createSupervisor({ store, workService, kibot, startTask, stopRun
         latestRunId: run?.id ?? null, updatedAt: task.updatedAt, summary: '独立任务，可查看结果或明确要求继续',
         result: run && run.status !== 'running' ? clip(run.output, 3000) : null,
         artifacts: context.artifacts.filter(item => item.status === 'current').slice(-12).map(({ id, name, version, status, kind }) => ({ id, name, version, status, kind })),
+        ...attentionFor(userId, task, { run, queueStatus: 'unmanaged', active: run?.status === 'running' }),
       };
     }
     const prior = db.prepare('SELECT run_id FROM kibot_jobs WHERE task_id=? AND run_id IS NOT NULL ORDER BY rowid DESC LIMIT 1').get(task.id);
     const run = prior && store.getRun(prior.run_id);
     const approvals = run?.status === 'running' && task.status !== 'cancelled' ? getApprovals(run.id) : [];
     const active = db.prepare("SELECT status FROM kibot_jobs WHERE task_id=? AND status IN ('running','dispatching') ORDER BY rowid DESC LIMIT 1").get(task.id);
-    const queueStatus = active?.status ?? job.status;
+    const unknown = db.prepare("SELECT * FROM kibot_jobs WHERE user_id=? AND task_id=? AND status='needs_reconciliation'")
+      .all(userId, task.id).some(item => !confirmedStopped(item));
+    // Cancellation changes the task's current intent, not the historical Run.
+    // Keep unresolved execution visible even after the user cancels the task.
+    const queueStatus = unknown ? 'needs_reconciliation' : task.status === 'cancelled' ? 'cancelled'
+      : active?.status ?? (task.status === 'succeeded' && !busyStatuses.includes(job.status) ? 'completed' : job.status);
     const summaries = { queued: '已加入队列，等待执行', dispatching: '正在启动任务', running: '任务正在执行', cancelled: '任务已取消', needs_reconciliation: '执行结果需要核对', failed: '执行遇到问题' };
-    let summary = job.error || (queueStatus === 'completed' ? task.status === 'succeeded' ? '结果已通过验收' : '本次执行已结束，可查看结果' : summaries[queueStatus]) || '任务状态已更新';
+    let summary = queueStatus === 'cancelled' ? summaries.cancelled
+      : queueStatus === 'completed' && task.status === 'succeeded' ? '结果已通过验收'
+      : job.error || (queueStatus === 'completed' ? '本次执行已结束，可查看结果' : summaries[queueStatus]) || '任务状态已更新';
     if (approvals.length && queueStatus !== 'needs_reconciliation') summary = '执行器需要你确认一项操作，请打开任务会话查看具体内容。';
     else if (queueStatus === 'running' && run) {
       const event = db.prepare('SELECT metadata FROM run_events WHERE run_id=? ORDER BY seq DESC LIMIT 1').get(run.id);
@@ -232,18 +341,20 @@ export function createSupervisor({ store, workService, kibot, startTask, stopRun
         id, name, version, status, kind, ...(typeof source?.url === 'string' && source.url.startsWith('/api/') ? { url: source.url } : {}),
       })),
       pendingFollowUp: !!active && job.status === 'queued', needsReconciliation: queueStatus === 'needs_reconciliation',
+      ...attentionFor(userId, task, { job, run, queueStatus, approvals, active: !!active || run?.status === 'running' }),
     };
   }
   function snapshot(userId) {
     account(userId);
     const rows = db.prepare('SELECT task_id,max(rowid) seq FROM kibot_jobs WHERE user_id=? GROUP BY task_id ORDER BY seq DESC LIMIT 200').all(userId);
     const tasks = rows.flatMap(({ task_id }) => { try { return [view(userId, task_id)]; } catch (error) { if (error.status === 404) return []; throw error; } });
-    const priority = task => ['failed', 'needs_reconciliation'].includes(task.queueStatus) || task.status === 'waiting_approval' ? 0
-      : busyStatuses.includes(task.queueStatus) ? 1 : attentionStatuses.includes(task.status) ? 0 : 2;
+    const priority = task => task.needsAttention ? 0 : busyStatuses.includes(task.queueStatus) ? 1 : 2;
     tasks.sort((a, b) => priority(a) - priority(b) || b.updatedAt.localeCompare(a.updatedAt));
     const counts = { queued: tasks.filter(task => task.queueStatus === 'queued').length,
       running: tasks.filter(task => ['running', 'dispatching'].includes(task.queueStatus)).length,
-      attention: tasks.filter(task => priority(task) === 0).length };
+      attention: tasks.filter(task => task.needsAttention).length,
+      actionRequired: tasks.filter(task => task.needsAttention && task.attention.requiresAction).length,
+      updates: tasks.filter(task => task.needsAttention && !task.attention.requiresAction).length };
     return { tasks, counts, revision: createHash('sha256').update(JSON.stringify(tasks)).digest('hex').slice(0, 24) };
   }
   function detail(userId, taskId) {
@@ -464,5 +575,5 @@ export function createSupervisor({ store, workService, kibot, startTask, stopRun
     timer.unref?.();
   }
   async function close() { closed = true; if (timer) clearInterval(timer); timer = null; await pumping; }
-  return { tools: supervisorTools, execute, snapshot, detail, stop, continueTask, assertManualTurn, observeRun, pump, start, close };
+  return { tools: supervisorTools, execute, snapshot, detail, acknowledge, retry, stop, continueTask, assertManualTurn, observeRun, pump, start, close };
 }

@@ -295,6 +295,17 @@ test('chat accepts inline multimodal inputs but cannot select remote files or un
   }
 });
 
+test('image tool actions survive the gateway and edits require an inline source image', () => {
+  const allowed = new Set(['image_generation']);
+  const input = [{ role: 'user', content: [{ type: 'input_image', image_url: 'data:image/png;base64,dGVzdA==' }] }];
+  for (const action of ['auto', 'generate', 'edit']) {
+    const payload = prepareResponseRequest({ input, tools: [{ type: 'image_generation', action }] }, config, allowed);
+    assert.deepEqual(payload.tools, [{ type: 'image_generation', action }]);
+  }
+  assert.throws(() => prepareResponseRequest({ input, tools: [{ type: 'image_generation', action: 'arbitrary' }] }, config, allowed), /操作无效/);
+  assert.throws(() => prepareResponseRequest({ input: 'edit it', tools: [{ type: 'image_generation', action: 'edit' }] }, config, allowed), /需要提供原图/);
+});
+
 test('Codex input-carried tools and reasoning updates retain the local-only tool boundary', () => {
   const body = { input: [
     { type: 'additional_tools', role: 'system', tools: [{ type: 'namespace', name: 'functions', tools: [{ type: 'function', name: 'exec_command', parameters: {} }] }] },

@@ -593,11 +593,12 @@ export function createStore(dbPath,{credentialsKey}={}) {
       const t=api.getThread(threadId);if(!t)throw new AppError('对话不存在',404);
       db.prepare('UPDATE threads SET title=?,codex_thread_id=?,updated_at=? WHERE id=?').run(t.isPrimary?'kibot':patch.title??t.title,patch.codexThreadId??t.codexThreadId,now(),threadId);return api.getThread(threadId);
     },
-    appendMessage(threadId,role,content,{attachments=[],citations=[],artifacts=[],uploads=[]}={}) {
+    appendMessage(threadId,role,content,{attachments=[],citations=[],artifacts=[],uploads=[],imageReferenceIds=[]}={}) {
       if(uploads.length&&(role!=='user'||artifacts.length||attachments.length))throw new AppError('附件只能保存到对应的用户消息');
       const messageId=id(),at=now(),metadata={};
       if(attachments.length)metadata.attachments=attachments;
       if(citations.length)metadata.citations=citations;
+      if(imageReferenceIds.length)metadata.imageReferenceIds=imageReferenceIds;
       return tx(()=>{
         const blobs=uploads.length?uploads:artifacts;
         if(blobs.length){

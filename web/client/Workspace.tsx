@@ -9,10 +9,10 @@ import { LocalApprovals } from './Local';
 import { PreviousTask, VerificationCard, useRunActivity } from './RunActivity';
 import { RunDetails } from './RunContext';
 import { WorkContext, taskTarget } from './WorkContext';
-import { MemoryDialog, TaskCard, TaskPanel, taskPriority } from './Supervisor';
+import { AttentionDialog, MemoryDialog, TaskCard, TaskPanel } from './Supervisor';
 import { dateInZone, KibotHistoryPanel, KibotSummaryList, useHistoryOverlay, useKibotTimeline, type KibotSummary } from './KibotTimeline';
 import { ErrorBox, Loading, StatusBadge, useDialog, useNotice } from './ui';
-import type { ChatModelOption, ChatTool, Message, Project, ReasoningEffort, Run, RunEvent, RunVerification, Thread, User, WorkRoute, WorkSelection, WorkSnapshot, WorkTask, SupervisorSnapshot, SupervisorTask } from './types';
+import type { ChatModelOption, ChatTool, Message, MessageArtifact, Project, ReasoningEffort, Run, RunEvent, RunVerification, Thread, User, WorkRoute, WorkSelection, WorkSnapshot, WorkTask, SupervisorSnapshot, SupervisorTask } from './types';
 
 const chatFileCount = 4;
 const chatFileBytes = 8 * 1024 * 1024;
@@ -50,6 +50,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
   const [ultraSelected, setUltraSelected] = useState(false);
   const [modelEfforts, setModelEfforts] = useState<Partial<Record<string, ReasoningEffort>>>({});
   const [attachments, setAttachments] = useState<File[]>([]);
+  const [editingImage, setEditingImage] = useState<MessageArtifact | null>(null);
   const [error, setError] = useState('');
   const [connectionLost, setConnectionLost] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
@@ -67,6 +68,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
   const [selectedTask, setSelectedTask] = useState<SupervisorTask | null>(null);
   const [taskReference, setTaskReference] = useState<SupervisorTask | null>(null);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const [attentionOpen, setAttentionOpen] = useState(false);
   const taskTrigger = useRef<HTMLButtonElement | null>(null);
   const supervisorLoadedSignature = useRef('');
   const historyTrigger = useRef<HTMLButtonElement | null>(null);
@@ -130,13 +132,14 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
   const cloudProject = !!project && project.location !== 'local';
   const resumable = cloudProject && run?.mode === 'cloud' && run.status === 'interrupted' && run.projectId === project?.id && !workSelection;
   const { events: activity, error: activityError, add: addActivity, refresh: refreshActivity } = useRunActivity(run?.mode ? run.id : undefined);
-  const chatTool = attachments.length ? 'analyze' : selectedTool;
+  const hasImageUploads = attachments.some(file => ['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || /\.(png|jpe?g|webp)$/i.test(file.name));
+  const chatTool = selectedTool === 'auto' && attachments.length && !hasImageUploads && !editingImage ? 'analyze' : selectedTool;
   const modelOptions: ChatModelOption[] = chatModels ?? (model ? [{ id: model, label: model, description: '' }] : []);
   const chatModel = modelOptions.find(option => option.id === selectedModel)
     ?? modelOptions.find(option => option.id === (defaultChatModel ?? model)) ?? modelOptions[0];
   const savedEffort = chatModel && modelEfforts[chatModel.id];
   const reasoningEffort = savedEffort && chatModel?.efforts?.includes(savedEffort) ? savedEffort : chatModel?.defaultEffort ?? undefined;
-  const ultraAvailable = !!chatModel?.supportsUltra && chatTool === 'auto';
+  const ultraAvailable = !!chatModel?.supportsUltra && chatTool === 'auto' && !attachments.length && !editingImage;
   const ultra = ultraSelected && ultraAvailable;
   useEffect(() => { if (!ultraAvailable) setUltraSelected(false); }, [ultraAvailable]);
   function selectEffort(effort?: ReasoningEffort) {
@@ -218,7 +221,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
     pinBottom.current = true; setError(''); setConnectionLost(false);
     if (threadId !== newlyCreatedThread.current) {
       setInput('');
-      setTaskReference(null); setSelectedTask(null); setMemoryOpen(false);
+      setTaskReference(null); setSelectedTask(null); setMemoryOpen(false); setAttentionOpen(false); setEditingImage(null);
       setVerificationOpen(false);
       setVerificationCommand('');
       setAttachments([]);
@@ -310,18 +313,27 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
     const empty = files.find(file => !file.size);
     if (empty) { notify(`附件「${empty.name}」是空文件。`, 'error'); return; }
     const next = [...attachments, ...files];
-    if (next.length > chatFileCount || next.reduce((sum, file) => sum + file.size, 0) > chatFileBytes) {
+    if (next.length + (editingImage ? 1 : 0) > chatFileCount || next.reduce((sum, file) => sum + file.size, editingImage?.size ?? 0) > chatFileBytes) {
       notify('每条消息最多添加 4 个附件，总大小不超过 8 MiB。', 'error');
       return;
     }
     setAttachments(next);
-    setSelectedTool('auto');
     setUltraSelected(false);
     textarea.current?.focus();
   }
 
+  function editImage(image: MessageArtifact) {
+    if (composerBusy || voiceBusy || project || hasWorkContext) return;
+    if (attachments.length + 1 > chatFileCount || attachments.reduce((sum, file) => sum + file.size, image.size) > chatFileBytes) {
+      notify('引用图片与附件合计最多 4 个、8 MiB，请先移除部分附件或缩小图片。', 'error'); return;
+    }
+    setEditingImage(image); setSelectedTool('image'); setUltraSelected(false); setHistorySummary(null);
+    requestAnimationFrame(() => textarea.current?.focus());
+  }
+
   async function send(event?: FormEvent) {
     event?.preventDefault();
+    if ((attachments.length || editingImage) && (project || hasWorkContext)) { notify('请先切换到普通问答后发送附件或继续编辑图片。', 'info'); return; }
     const text = input.trim();
     const hasFiles = !project && attachments.length > 0;
     if ((!text && !hasFiles) || sendingRef.current || loading || running || taskUnavailable || isKibot && !work || !providerConfigured) return;
@@ -343,7 +355,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
       if (work?.mode === 'enforce') {
         // Keep the same request identity and focus version after an uncertain
         // network result. A draft/selection change creates a distinct request.
-        const fingerprint = JSON.stringify({ conversationId: id, text, work: workSelection, tool: chatTool, model: chatModel?.id, reasoningEffort, ultra, check, taskReferenceId: isKibot ? taskReference?.id : undefined });
+        const fingerprint = JSON.stringify({ conversationId: id, text, work: workSelection, tool: chatTool, model: chatModel?.id, reasoningEffort, ultra, check, taskReferenceId: isKibot ? taskReference?.id : undefined, imageReferenceIds: editingImage ? [editingImage.id] : undefined });
         const previous = sendAttempt.current;
         if (!previous || previous.fingerprint !== fingerprint || previous.files.length !== attachments.length || previous.files.some((file, index) => file !== attachments[index])) {
           sendAttempt.current = { fingerprint, files: [...attachments], requestId: crypto.randomUUID(), work: workRequest };
@@ -351,16 +363,18 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
         requestId = sendAttempt.current!.requestId;
         workRequest = sendAttempt.current!.work;
       }
-      let body: { text: string; tool?: ChatTool; model?: string; mode?: 'ultra'; reasoningEffort?: ReasoningEffort; verificationCommand?: string; requestId?: string; work?: WorkSelection | { focusRevision: number }; taskReferenceId?: string } | FormData = project
+      let body: { text: string; tool?: ChatTool; model?: string; mode?: 'ultra'; reasoningEffort?: ReasoningEffort; verificationCommand?: string; requestId?: string; work?: WorkSelection | { focusRevision: number }; taskReferenceId?: string; imageReferenceIds?: string[] } | FormData = project
         ? { text, ...(check ? { verificationCommand: check } : {}) }
         : { text, tool: chatTool, model: chatModel?.id, ...(ultra ? { mode: 'ultra' } : { reasoningEffort }) };
       if (workRequest) body.work = workRequest;
       if (requestId) body.requestId = requestId;
       if (isKibot && taskReference) body.taskReferenceId = taskReference.id;
+      if (!project && editingImage) body.imageReferenceIds = [editingImage.id];
       if (hasFiles) {
         const form = new FormData();
         form.set('text', text);
-        form.set('tool', 'analyze');
+        form.set('tool', chatTool);
+        if (editingImage) form.set('imageReferenceIds', JSON.stringify([editingImage.id]));
         if (chatModel) form.set('model', chatModel.id);
         if (reasoningEffort) form.set('reasoningEffort', reasoningEffort);
         if (work?.mode === 'enforce' && (isKibot || workSelection?.intent === 'question')) form.set('work', JSON.stringify({ intent: 'question', focusRevision: workRequest?.focusRevision ?? work?.focus?.revision ?? 0 }));
@@ -376,7 +390,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
       if (!mounted.current || threadRef.current !== id) return;
       setInput(''); setVerificationOpen(false); setVerificationCommand(''); setTaskReference(null);
       sendAttempt.current = null;
-      setAttachments([]); setSelectedTool('auto'); setRun(result.run);
+      setAttachments([]); setEditingImage(null); setSelectedTool('auto'); setRun(result.run);
       setWorkSelection(undefined); setWorkRoute(null); void refreshWork();
       setUltraSelected(false);
       await loadThread(id); void refreshSession().catch(() => undefined);
@@ -448,7 +462,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
   }
   async function changeWorkSelection(selection?: WorkSelection) {
     if (composerBusy || voiceBusy) return;
-    if (attachments.length && selection?.intent !== 'question') { notify('请先移除附件，再选择工作任务。', 'info'); return; }
+    if ((attachments.length || editingImage) && selection?.intent !== 'question') { notify('请先移除附件和引用图片，再选择工作任务。', 'info'); return; }
     const id = threadRef.current;
     if (getDirtyFile() && !await ask({ title: '切换工作上下文？', description: `${getDirtyFile()} 尚有未保存的编辑。切换前请先保存，或确认放弃编辑。`, confirm: '放弃编辑并切换', danger: true })) return;
     if (!mounted.current || threadRef.current !== id || sendingRef.current) return;
@@ -478,7 +492,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
     {isKibot && supervisor && supervisor.tasks.length > 0 && <div className="supervisor-task-strip" aria-label="后台任务状态">
       {!!supervisor.counts.running && <button onClick={onShowTasks}><Icon name="activity" size={13} />进行中 {supervisor.counts.running}</button>}
       {!!supervisor.counts.queued && <button onClick={onShowTasks}><Icon name="clock" size={13} />排队中 {supervisor.counts.queued}</button>}
-      {!!supervisor.counts.attention && <button className="supervisor-attention" onClick={event => { const task = supervisor.tasks.find(task => taskPriority(task) === 0); if (task) openTaskDetail(task, event.currentTarget); else onShowTasks?.(); }}><Icon name="info" size={13} />需要你处理 {supervisor.counts.attention}</button>}
+      {!!supervisor.counts.attention && <button className="supervisor-attention" onClick={event => { taskTrigger.current = event.currentTarget; setAttentionOpen(true); }}><Icon name="info" size={13} />任务提醒 {supervisor.counts.attention}</button>}
       <button onClick={onShowTasks}>全部任务<Icon name="chevron" size={12} /></button>
     </div>}
     {isKibot && taskReference && <div className="supervisor-reference"><Icon name="chat" size={14} /><span>关于：{taskReference.goal}</span><button className="icon-button" aria-label="取消引用任务" onClick={() => setTaskReference(null)}><Icon name="close" size={13} /></button></div>}
@@ -506,6 +520,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
         {running ? <button type="button" className="send-button stop-button" title="停止任务" aria-label="停止任务" disabled={stopping} onClick={() => void interrupt()}>{stopping ? <span className="spinner" /> : <Icon name="stop" size={17} />}</button> : <button type="submit" className="send-button" title="发送消息" aria-label="发送消息" disabled={!input.trim() || composerBusy || !providerConfigured}>{sending ? <span className="spinner" /> : <Icon name="send" size={21} />}</button>}
       </div>
     </form> : <ChatComposer draft={input} setDraft={setInput} textarea={textarea} attachments={attachments} onAttach={attachFiles}
+      editingImage={editingImage} onClearImage={() => setEditingImage(null)}
       onRemove={index => setAttachments(files => files.filter((_, i) => i !== index))} tool={chatTool} onTool={setSelectedTool}
       model={chatModel} models={modelOptions} onModel={id => { setSelectedModel(id); setUltraSelected(false); }}
       effort={ultra ? 'max' : reasoningEffort} onEffort={selectEffort} ultra={ultra} ultraAvailable={ultraAvailable} onUltra={setUltraSelected}
@@ -521,7 +536,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
     {isKibot && <p className="kibot-composer-note">历史保留，摘要仅折叠展示。<button className="text-button" onClick={() => { setSelectedTask(null); setHistorySummary(null); setMemoryOpen(true); }}>工作记忆</button></p>}
   </div>;
   return <div ref={workspaceElement} className={'workspace-body' + (panelOpen ? ' with-panel' : '') + (isKibot ? ' kibot-workspace' : '') + (historySummary ? ' kibot-history-open' : '')}>
-    <section className={'chat-panel' + (emptyConversation ? ' chat-panel-empty' : '')} aria-label={isKibot ? 'kibot 主会话' : undefined} inert={(!!historySummary || !!selectedTask) && historyOverlay || memoryOpen || undefined}>
+    <section className={'chat-panel' + (emptyConversation ? ' chat-panel-empty' : '')} aria-label={isKibot ? 'kibot 主会话' : undefined} inert={(!!historySummary || !!selectedTask) && historyOverlay || memoryOpen || attentionOpen || undefined}>
       {!isKibot && <header className={'workspace-header' + (project ? '' : ' workspace-header-chat')}>
         <div className="breadcrumb"><span>{project?.name || 'kivo'}</span><Icon name="chevron" size={14} /><strong>{title || '新的对话'}</strong></div>
         {project && <><div className="workspace-mode-switch" role="group" aria-label="界面模式"><button className={!panelOpen ? 'selected' : ''} aria-pressed={!panelOpen} onClick={() => void changePanel(false)}><Icon name="chat" size={15} />聊天</button><button className={panelOpen ? 'selected' : ''} aria-pressed={panelOpen} onClick={() => void changePanel(true)}><Icon name="code" size={16} />工作</button></div>
@@ -551,11 +566,11 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
                   {message.role === 'assistant' && message.content && <button className="icon-button message-copy" title="复制回答" aria-label="复制回答" onClick={() => void copy(message.content)}><Icon name="copy" size={14} /></button>}
                 </div>
                 {message.role === 'user' ? <>
-                  {!!message.attachments?.length && <AttachmentChips files={message.attachments} />}
+                  {!!message.attachments?.length && <AttachmentChips files={message.attachments} onEdit={!project && !hasWorkContext ? editImage : undefined} disabled={composerBusy || voiceBusy} />}
                   {message.content && <div className="user-message-content">{message.content}</div>}
                 </> : <>
                   {(message.content || !!message.citations?.length) && <Markdown content={message.content} citations={message.citations} />}
-                  {!!message.artifacts?.length && <ChatImages artifacts={message.artifacts} onLoad={followOutput} />}
+                  {!!message.artifacts?.length && <ChatImages artifacts={message.artifacts} onLoad={followOutput} onEdit={!project && !hasWorkContext ? editImage : undefined} disabled={composerBusy || voiceBusy} />}
                 </>}
                 {message.role === 'assistant' && replyLinks.find(link=>link.messageId===message.id) && <RunDetails key={replyLinks.find(link=>link.messageId===message.id)!.runId} runId={replyLinks.find(link=>link.messageId===message.id)!.runId} live={run?.id===replyLinks.find(link=>link.messageId===message.id)!.runId?run:undefined} events={activity} error={activityError} refresh={refreshActivity}/>}
               </div>
@@ -580,9 +595,10 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
         {emptyConversation && <div className="starter-chips">{(project ? starters : chatStarters).map(starter => <button className="starter-chip" key={starter.title} onClick={() => { setInput(starter.text); textarea.current?.focus(); }}><Icon name={starter.icon} size={16} /><span>{starter.title}</span></button>)}</div>}
       </div>
     </section>
-    {isKibot && historySummary && <KibotHistoryPanel key={`${user.id}:${historySummary.id}:${historySummary.endAt}:${historySummary.messageCount}`} summary={historySummary} timeZone={timeline.timeZone} user={user} overlay={historyOverlay} returnFocus={historyTrigger} onClose={() => setHistorySummary(null)} />}
+    {isKibot && historySummary && <KibotHistoryPanel key={`${user.id}:${historySummary.id}:${historySummary.endAt}:${historySummary.messageCount}`} summary={historySummary} timeZone={timeline.timeZone} user={user} overlay={historyOverlay} returnFocus={historyTrigger} onClose={() => setHistorySummary(null)} onEditImage={editImage} editDisabled={composerBusy || voiceBusy} />}
     {isKibot && displayedTask && <TaskPanel key={displayedTask.id} task={displayedTask} revision={supervisor?.revision} overlay={historyOverlay} returnFocus={taskTrigger} onClose={() => setSelectedTask(null)} onReference={referenceTask} onOpenConversation={task => onOpenTask?.(task)} onRefresh={() => onRefreshSupervisor?.()} />}
     {isKibot && memoryOpen && <MemoryDialog onClose={() => setMemoryOpen(false)} />}
+    {isKibot && attentionOpen && <AttentionDialog tasks={supervisor?.tasks ?? []} onClose={() => setAttentionOpen(false)} onSelect={task => { setAttentionOpen(false); setHistorySummary(null); setSelectedTask(task); }} />}
     {project && panelOpen && <Files project={project} revision={revision} locked={!!running} tab={panelTab} onTabChange={setPanelTab} onClose={closePanel} />}
   </div>;
 }

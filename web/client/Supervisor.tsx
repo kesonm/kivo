@@ -48,20 +48,43 @@ export function taskStatus(task: Pick<SupervisorTask, 'status' | 'queueStatus'>)
   if (['failed', 'cancelled', 'needs_reconciliation'].includes(task.queueStatus)) return labels[task.queueStatus];
   return labels[task.status] ?? labels[task.queueStatus] ?? '待核对状态';
 }
-export function taskPriority(task: Pick<SupervisorTask, 'status' | 'queueStatus'>) {
+export function taskPriority(task: Pick<SupervisorTask, 'status' | 'queueStatus' | 'needsAttention'>) {
+  if (task.needsAttention) return 0;
   if (task.queueStatus === 'queued') return 2;
-  if (['needs_reconciliation', 'failed'].includes(task.queueStatus) || ['waiting_approval', 'needs_reconciliation', 'failed', 'waiting_input'].includes(task.status)) return 0;
   if (['running', 'dispatching'].includes(task.queueStatus) || task.status === 'running') return 1;
   if (task.queueStatus === 'queued' || task.status === 'ready') return 2;
   return 3;
 }
+
+const attentionLabels = { failed: '执行失败', result: '结果待查看', approval: '需要授权', reconciliation: '执行结果待核对', input: '需要补充信息' };
+const attentionHints = {
+  failed: '可以重试这项任务、放弃继续执行，或先确认这次提醒。',
+  result: '打开任务会话查看完整结果；确认已读后可收起本次提醒。',
+  approval: '请打开任务会话，确认或拒绝具体的执行请求。',
+  reconciliation: '执行是否停止以及已有操作结果尚需核对，请打开任务会话处理。',
+  input: '请打开任务会话补充信息，或和 kibot 讨论下一步。',
+};
+
+export function AttentionDialog({ tasks, onClose, onSelect }: {
+  tasks: SupervisorTask[]; onClose: () => void; onSelect: (task: SupervisorTask) => void;
+}) {
+  const pending = tasks.filter(task => task.needsAttention === true);
+  return <Modal title="需要你处理" description="查看待处理事项，并选择下一步。" onClose={onClose}>
+    <div className="nav-dialog-body supervisor-attention-list">
+      {pending.map(task => <TaskCard key={task.id} task={task} onOpen={value => onSelect(value)} />)}
+      {!pending.length && <p className="nav-empty" role="status">当前没有待处理事项。</p>}
+    </div>
+  </Modal>;
+}
+
 export function TaskCard({ task, onOpen }: { task: SupervisorTask; onOpen: (task: SupervisorTask, trigger: HTMLButtonElement) => void }) {
   const title = task.conversationTitle || task.goal;
-  return <button type="button" className="supervisor-task-card" onClick={event => onOpen(task, event.currentTarget)} aria-label={`查看任务：${title}`}>
+  return <button type="button" className="supervisor-task-card" data-needs-attention={task.needsAttention || undefined} onClick={event => onOpen(task, event.currentTarget)} aria-label={`查看任务：${title}`}>
     <span className="supervisor-card-heading"><Icon name={task.projectId ? 'code' : 'chat'} size={16} /><strong>{title}</strong><span className="supervisor-status">{taskStatus(task)}</span></span>
     <span className="supervisor-card-project">{task.projectName || '独立文字任务'}</span>
     {task.summary && <span className="supervisor-card-summary">{task.summary}</span>}
     {task.pendingFollowUp && <span className="supervisor-card-project">已收到补充要求，等待当前执行结束</span>}
+    {task.attention?.acknowledged && <span className="supervisor-card-project">{task.attention.kind === 'failed' ? '已知晓这次失败' : '已查看本次结果'}</span>}
     <span className="supervisor-card-link">查看任务<Icon name="arrow" size={14} /></span>
   </button>;
 }
@@ -73,8 +96,11 @@ export function TaskPanel({ task, revision, overlay, returnFocus, onClose, onRef
   const [detail, setDetail] = useState<SupervisorDetail | null>(null);
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
-  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<'stop' | 'retry' | 'ack' | null>(null);
+  const busy = busyAction !== null;
+  const actionPending = useRef(false);
   const [actionError, setActionError] = useState('');
+  const [actionNotice, setActionNotice] = useState('');
   const panel = useRef<HTMLElement>(null), close = useRef<HTMLButtonElement>(null);
   const restoreFocus = useRef(true);
   const alive = useRef(true), closeAction = useRef(onClose); closeAction.current = onClose;
@@ -108,15 +134,26 @@ export function TaskPanel({ task, revision, overlay, returnFocus, onClose, onRef
   }, [overlay]);
   const current = detail?.task ?? task;
   const artifacts = detail?.artifacts ?? current.artifacts ?? [];
+  const attention = current.attention;
+  const canRetry = attention?.canRetry === true;
+  const canAbandon = attention?.canAbandon === true;
+  const canDismiss = attention?.canDismiss === true && !attention.acknowledged;
   const stoppable = ['queued', 'dispatching', 'running'].includes(current.queueStatus) || ['running', 'waiting_approval'].includes(current.status);
-  async function stop() {
-    if (busy) return;
-    setBusy(true); setActionError('');
+  async function act(action: 'stop' | 'retry' | 'ack') {
+    if (actionPending.current || action === 'retry' && !canRetry || action === 'ack' && !canDismiss) return;
+    actionPending.current = true; setBusyAction(action); setActionError(''); setActionNotice('');
     try {
-      await api(`/api/kibot/tasks/${enc(task.id)}/stop`, { method: 'POST', body: {} });
-      if (alive.current) { onRefresh(); setRetry(value => value + 1); }
-    } catch (error) { if (alive.current) setActionError(messageOf(error)); }
-    finally { if (alive.current) setBusy(false); }
+      const result = await api<{ task: SupervisorTask; warning?: string }>(`/api/kibot/tasks/${enc(task.id)}/${action}`, {
+        method: 'POST', body: { expectedVersion: current.version, ...(action === 'stop' ? {} : { eventKey: attention?.key }) },
+      });
+      if (alive.current) {
+        setDetail(previous => ({ ...previous, task: result.task }));
+        setActionNotice(result.warning || (action === 'ack' ? attention?.kind === 'failed' ? '已知晓这次失败。任务仍保留失败状态，可稍后重试。' : '已确认查看本次结果。' : action === 'retry' ? '任务已加入重试队列。' : '任务已停止继续执行。'));
+        onRefresh(); setRetry(value => value + 1);
+      }
+    } catch (error) {
+      if (alive.current) { setActionError(messageOf(error)); onRefresh(); setRetry(value => value + 1); }
+    } finally { actionPending.current = false; if (alive.current) setBusyAction(null); }
   }
   return <>
     {overlay && <button className="kibot-history-backdrop" tabIndex={-1} aria-label="关闭任务详情" onClick={onClose} />}
@@ -125,6 +162,10 @@ export function TaskPanel({ task, revision, overlay, returnFocus, onClose, onRef
       <div className="kibot-history-scroll supervisor-detail-scroll">
         {error && <ErrorBox error={error} onRetry={() => setRetry(value => value + 1)} />}
         {!detail && !error && <Loading label="读取任务进展…" />}
+        {attention && <section className={'supervisor-attention-detail' + (attention.acknowledged ? ' acknowledged' : '')}>
+          <h3>{attention.acknowledged ? attention.kind === 'failed' ? '已知晓失败' : '已查看结果' : attentionLabels[attention.kind]}</h3>
+          <p>{attention.acknowledged ? attention.kind === 'failed' ? '失败记录已保留，可以稍后重试或放弃任务。' : '原始结果与验收状态保留在任务会话中。' : attentionHints[attention.kind]}</p>
+        </section>}
         <section className="supervisor-detail-section"><h3>任务目标</h3><p>{current.goal}</p></section>
         {current.summary && <section className="supervisor-detail-section"><h3>最新进展</h3><Markdown content={current.summary} /></section>}
         {current.result && <section className="supervisor-detail-section"><h3>结果摘录</h3><Markdown content={current.result} /></section>}
@@ -134,9 +175,15 @@ export function TaskPanel({ task, revision, overlay, returnFocus, onClose, onRef
       </div>
       <div className="supervisor-panel-actions">
         {actionError && <ErrorBox error={actionError} />}
-        <button className="button primary" onClick={() => { restoreFocus.current = false; onReference(current); }}><Icon name="chat" size={15} />和 kibot 讨论这项任务</button>
+        {actionNotice && <p className="supervisor-action-notice" role="status">{actionNotice}</p>}
+        {(canRetry || canAbandon || canDismiss) && <div className="supervisor-resolution-actions" aria-label="处理任务提醒">
+          {canRetry && <button className="button primary" disabled={busy} onClick={() => void act('retry')}><Icon name="refresh" size={15} />{busyAction === 'retry' ? '正在重试…' : '重试任务'}</button>}
+          {canAbandon && <button className="button secondary supervisor-abandon" disabled={busy} onClick={() => void act('stop')}>{busyAction === 'stop' ? '正在放弃…' : '放弃任务'}</button>}
+          {canDismiss && <button className="button secondary" disabled={busy} onClick={() => void act('ack')}>{busyAction === 'ack' ? '正在确认…' : '知道了'}</button>}
+        </div>}
+        <button className={'button ' + (canRetry ? 'secondary' : 'primary')} disabled={busy} onClick={() => { restoreFocus.current = false; onReference(current); }}><Icon name="chat" size={15} />和 kibot 讨论这项任务</button>
         <button className="button secondary" onClick={() => onOpenConversation(current)}>打开任务会话<Icon name="arrow" size={15} /></button>
-        {stoppable && <button className="text-button supervisor-stop" disabled={busy} onClick={() => void stop()}>{busy ? '正在停止…' : current.queueStatus === 'queued' ? '取消排队' : '停止执行'}</button>}
+        {stoppable && <button className="text-button supervisor-stop" disabled={busy} onClick={() => void act('stop')}>{busyAction === 'stop' ? '正在停止…' : current.queueStatus === 'queued' ? '取消排队' : '停止执行'}</button>}
       </div>
     </aside>
   </>;

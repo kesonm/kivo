@@ -32,6 +32,17 @@
 .supervisor-nav-count { margin-left:auto; display:inline-flex; justify-content:center; align-items:center; min-width:20px; height:20px; border:1px solid #eedbd0; border-radius:6px; color:#9b4c27; font-size:10px; }
 .supervisor-all-list { max-height:60vh; overflow:auto; }
 .supervisor-all-list .supervisor-task-card { margin-top:0; }
+.supervisor-attention-list { max-height:65vh; overflow:auto; }
+.supervisor-attention-list .supervisor-task-card { margin-top:0; }
+.supervisor-task-card[data-needs-attention] { border-color:#e8d6c9; }
+.supervisor-attention-detail { padding:13px 15px; margin:0 0 22px; border:1px solid #e8d6c9; border-radius:10px; }
+.supervisor-attention-detail h3 { margin:0 0 7px; color:#9b4c27; font-size:12px; font-weight:550; }
+.supervisor-attention-detail p { margin:0; color:#666; font-size:12px; line-height:1.8; }
+.supervisor-attention-detail.acknowledged { border-color:#e5e5e5; }
+.supervisor-attention-detail.acknowledged h3 { color:#666; }
+.supervisor-resolution-actions { display:flex; flex-wrap:wrap; gap:8px; width:100%; padding-bottom:9px; border-bottom:1px solid #eee; }
+.supervisor-resolution-actions .supervisor-abandon { color:#a44c4c; }
+.supervisor-action-notice { width:100%; margin:0; color:#666; font-size:12px; line-height:1.7; }
 .kibot-composer-note .text-button { margin-left:12px; font-size:10px; color:#777; }
 .supervisor-memory { max-height:65vh; overflow:auto; }
 .supervisor-memory-note { padding:15px; border:1px solid #eee; border-radius:10px; margin:0 0 12px; }

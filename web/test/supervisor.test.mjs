@@ -275,3 +275,228 @@ test('confirmed stopped runs allow an explicit continuation without automaticall
   await f.service.pump();
   assert.equal(f.starts.length, 2);
 });
+
+const attentionAction = task => ({ eventKey: task.attention.key, expectedVersion: task.version });
+
+test('acknowledging a failed event persists without changing execution history or accepting the task', async t => {
+  const f = fixture(t);
+  const { task } = await f.delegate('失败提醒可以单独确认');
+  await f.service.pump();
+  f.complete(0, 'failed');
+  await f.service.pump();
+  const failed = f.service.detail(f.user.id, task.id).task;
+  assert.equal(failed.attention.kind, 'failed');
+  assert.equal(failed.attention.requiresAction, false);
+  assert.equal(failed.attention.canDismiss, true);
+  assert.equal(failed.attention.canRetry, true);
+  assert.equal(failed.attention.canAbandon, true);
+  assert.equal(f.service.snapshot(f.user.id).counts.attention, 1, 'reading details is not an acknowledgment');
+  assert.equal(f.service.snapshot(f.user.id).counts.actionRequired, 0);
+  assert.equal(f.service.snapshot(f.user.id).counts.updates, 1);
+  const action = attentionAction(failed), before = f.service.snapshot(f.user.id).revision;
+  const acknowledged = f.service.acknowledge(f.user.id, task.id, action).task;
+  assert.equal(acknowledged.status, 'failed');
+  assert.equal(acknowledged.queueStatus, 'failed');
+  assert.equal(acknowledged.version, failed.version);
+  assert.equal(acknowledged.attention.acknowledged, true);
+  assert.equal(acknowledged.attention.canRetry, true);
+  assert.equal(acknowledged.needsAttention, false);
+  assert.equal(f.store.getRun(failed.latestRunId).status, 'failed');
+  assert.deepEqual(f.service.acknowledge(f.user.id, task.id, action).task, acknowledged);
+  assert.notEqual(f.service.snapshot(f.user.id).revision, before);
+  await f.recreate();
+  await f.service.pump();
+  assert.equal(f.service.snapshot(f.user.id).counts.attention, 0);
+  assert.equal(f.service.detail(f.user.id, task.id).task.attention.key, action.eventKey);
+  assert.equal(f.store.db.prepare('SELECT count(*) n FROM kibot_task_acknowledgments').get().n, 1);
+});
+
+test('result acknowledgment only clears the update and does not mark the task as accepted', async t => {
+  const f = fixture(t);
+  const { task } = await f.delegate('待查看结果');
+  await f.service.pump();
+  f.complete();
+  await f.service.pump();
+  const result = f.service.detail(f.user.id, task.id).task;
+  assert.equal(result.status, 'waiting_input');
+  assert.equal(result.attention.kind, 'result');
+  assert.equal(result.attention.canRetry, false);
+  assert.equal(f.service.snapshot(f.user.id).counts.updates, 1);
+  const evidence = f.service.detail(f.user.id, task.id).evidence;
+  const acknowledged = f.service.acknowledge(f.user.id, task.id, attentionAction(result)).task;
+  assert.equal(acknowledged.status, 'waiting_input');
+  assert.equal(acknowledged.needsAttention, false);
+  assert.deepEqual(f.service.detail(f.user.id, task.id).evidence, evidence);
+  assert.equal(f.service.snapshot(f.user.id).counts.attention, 0);
+});
+
+test('retry is explicit, atomic and idempotent, and a new failure creates a fresh reminder', async t => {
+  const f = fixture(t);
+  const { task } = await f.delegate('重试保留原授权');
+  await f.service.pump();
+  f.complete(0, 'failed');
+  await f.service.pump();
+  const failed = f.service.detail(f.user.id, task.id).task, action = attentionAction(failed);
+  f.service.acknowledge(f.user.id, task.id, action);
+  const oldRunCount = f.store.db.prepare('SELECT count(*) n FROM runs').get().n;
+  const oldAssistantCount = f.store.getMessages(f.primary.id).filter(message => message.role === 'assistant').length;
+  const [first, second] = await Promise.all([
+    Promise.resolve().then(() => f.service.retry(f.user.id, task.id, action)),
+    Promise.resolve().then(() => f.service.retry(f.user.id, task.id, action)),
+  ]);
+  assert.equal(first.task.queueStatus, 'queued');
+  assert.equal(first.task.needsAttention, false);
+  assert.equal(second.replayed, true);
+  assert.equal(f.store.db.prepare("SELECT count(*) n FROM kibot_jobs WHERE task_id=? AND status='queued'").get(task.id).n, 1);
+  assert.equal(f.store.db.prepare('SELECT count(*) n FROM runs').get().n, oldRunCount, 'the click does not invent a Run');
+  assert.equal(f.store.getMessages(f.primary.id).filter(message => message.role === 'assistant').length, oldAssistantCount);
+  const source = f.store.getMessage(first.task.originMessageId);
+  assert.equal(source.role, 'user');
+  assert.equal(f.store.db.prepare('SELECT thread_id FROM messages WHERE id=?').get(source.id).thread_id, f.primary.id);
+  assert.equal(source.supervisorAction, 'retry');
+  assert.equal(source.supervisorTaskId, task.id);
+  assert.match(source.content, /重试任务/);
+  const queued = f.store.db.prepare('SELECT * FROM kibot_jobs WHERE origin_message_id=?').get(source.id);
+  assert.equal(queued.source_run_id, null);
+  assert.equal(queued.model, 'test-model');
+  await f.recreate();
+  assert.equal(f.service.retry(f.user.id, task.id, action).replayed, true);
+  await f.service.pump();
+  assert.equal(f.starts.length, 2);
+  assert.equal(f.service.retry(f.user.id, task.id, action).replayed, true);
+  f.complete(1, 'failed');
+  await f.service.pump();
+  const again = f.service.detail(f.user.id, task.id).task;
+  assert.equal(again.attention.kind, 'failed');
+  assert.notEqual(again.attention.key, failed.attention.key);
+  assert.equal(again.attention.acknowledged, false);
+  assert.equal(again.needsAttention, true);
+  assert.equal(f.service.snapshot(f.user.id).counts.attention, 1);
+  assert.throws(() => f.service.retry(f.user.id, task.id, action), error => error.status === 409);
+  assert.throws(() => f.service.acknowledge(f.user.id, task.id, action), error => error.status === 409);
+  assert.deepEqual(f.store.db.prepare('PRAGMA foreign_key_check').all(), []);
+});
+
+test('repeated retries retain full long instructions without accumulating previous retry prompts', async t => {
+  const f = fixture(t);
+  const goal = '需求'.repeat(12000);
+  const { task } = await f.delegate(goal);
+  const original = f.store.db.prepare('SELECT prompt FROM kibot_jobs WHERE task_id=?').get(task.id).prompt;
+  f.error(new AppError('temporary failure', 502));
+  await f.service.pump();
+  const firstFailure = f.service.detail(f.user.id, task.id).task;
+  f.service.retry(f.user.id, task.id, attentionAction(firstFailure));
+  const firstPrompt = f.store.db.prepare('SELECT prompt FROM kibot_jobs WHERE task_id=? ORDER BY rowid DESC LIMIT 1').get(task.id).prompt;
+  assert.ok(firstPrompt.endsWith(original), 'the original request is not truncated by the follow-up input limit');
+  assert.ok(firstPrompt.length > 24000);
+  await f.service.pump();
+  const secondFailure = f.service.detail(f.user.id, task.id).task;
+  f.service.retry(f.user.id, task.id, attentionAction(secondFailure));
+  const secondPrompt = f.store.db.prepare('SELECT prompt FROM kibot_jobs WHERE task_id=? ORDER BY rowid DESC LIMIT 1').get(task.id).prompt;
+  assert.equal(secondPrompt, firstPrompt);
+});
+
+test('ack and retry enforce ownership, event freshness, version and operation capabilities', async t => {
+  const f = fixture(t);
+  const { task } = await f.delegate('提醒权限');
+  f.error(new AppError('failed', 502));
+  await f.service.pump();
+  const failed = f.service.detail(f.user.id, task.id).task, action = attentionAction(failed);
+  for (const operation of ['acknowledge', 'retry']) {
+    assert.throws(() => f.service[operation](f.other.id, task.id, action), error => error.status === 404);
+    assert.throws(() => f.service[operation](f.user.id, task.id, { ...action, eventKey: 'old-event' }), error => error.status === 409);
+    assert.throws(() => f.service[operation](f.user.id, task.id, { ...action, expectedVersion: task.version + 1 }), error => error.status === 409);
+    assert.throws(() => f.service[operation](f.user.id, task.id, null), error => error.status === 400);
+    assert.throws(() => f.service[operation](f.user.id, task.id, { eventKey: action.eventKey }), error => error.status === 400);
+  }
+  f.workService.graph.updateTask(f.user.id, task.id, { expectedVersion: task.version, goal: '全新任务要求' });
+  const changed = f.service.detail(f.user.id, task.id).task;
+  assert.equal(changed.attention.canRetry, false, 'cannot replay superseded requirements');
+  assert.throws(() => f.service.retry(f.user.id, task.id, attentionAction(changed)), error => error.status === 409);
+  assert.equal(f.store.db.prepare('SELECT count(*) n FROM kibot_task_retries').get().n, 0);
+});
+
+test('cancelling a failed task clears attention without erasing its failed execution', async t => {
+  const f = fixture(t);
+  const { task } = await f.delegate('放弃失败任务');
+  await f.service.pump();
+  f.complete(0, 'failed');
+  await f.service.pump();
+  const failed = f.service.detail(f.user.id, task.id).task;
+  const stopped = await f.service.stop(f.user.id, task.id, { expectedVersion: failed.version });
+  assert.equal(stopped.task.status, 'cancelled');
+  assert.equal(stopped.task.queueStatus, 'cancelled');
+  assert.equal(stopped.task.attention, null);
+  assert.equal(stopped.task.needsAttention, false);
+  assert.equal(f.service.snapshot(f.user.id).counts.attention, 0);
+  assert.equal(f.store.db.prepare('SELECT status FROM kibot_jobs WHERE task_id=?').get(task.id).status, 'failed');
+  assert.equal(f.store.getRun(failed.latestRunId).status, 'failed');
+  await f.recreate();
+  await f.service.pump();
+  assert.equal(f.service.snapshot(f.user.id).counts.attention, 0);
+});
+
+test('approval and unknown-execution reminders cannot be dismissed or retried', async t => {
+  const f = fixture(t, { stopError: true });
+  const { task } = await f.delegate('仍需实际处理');
+  await f.service.pump();
+  f.pendingApprovals.set(f.starts[0].run.id, [{ id: 'approval-action', kind: 'command' }]);
+  const approval = f.service.detail(f.user.id, task.id).task;
+  assert.equal(approval.attention.kind, 'approval');
+  assert.equal(approval.attention.requiresAction, true);
+  assert.equal(f.service.snapshot(f.user.id).counts.actionRequired, 1);
+  assert.equal(f.service.snapshot(f.user.id).counts.updates, 0);
+  assert.throws(() => f.service.acknowledge(f.user.id, task.id, attentionAction(approval)), error => error.code === 'supervisor_attention_required');
+  assert.throws(() => f.service.retry(f.user.id, task.id, attentionAction(approval)), error => error.code === 'supervisor_task_unavailable');
+  const cancelled = await f.service.stop(f.user.id, task.id, { expectedVersion: approval.version });
+  assert.equal(cancelled.task.status, 'cancelled');
+  assert.equal(cancelled.task.attention.kind, 'reconciliation');
+  assert.equal(cancelled.task.needsAttention, true);
+  for (const blocked of [approval, cancelled.task]) {
+    assert.equal(blocked.attention.canDismiss, false);
+    assert.equal(blocked.attention.canRetry, false);
+    assert.equal(blocked.attention.canAbandon, false);
+    for (const operation of ['acknowledge', 'retry']) {
+      assert.throws(() => f.service[operation](f.user.id, task.id, attentionAction(blocked)), error => error.status === 409);
+    }
+  }
+  assert.equal(f.service.snapshot(f.user.id).counts.attention, 1);
+});
+
+test('explicit acceptance supersedes an older failed queue record but never hides unknown execution', async t => {
+  const f = fixture(t);
+  const { task } = await f.delegate('验收现有结果');
+  await f.service.pump();
+  f.complete();
+  await f.service.pump();
+  const artifact = f.service.detail(f.user.id, task.id).artifacts[0];
+  await f.call('kivo_continue_task', { taskId: task.id, instruction: '补充检查', expectedVersion: task.version }, 'follow-up');
+  f.error(new AppError('后续执行启动失败', 502));
+  await f.service.pump();
+  assert.equal(f.service.detail(f.user.id, task.id).task.queueStatus, 'failed');
+  f.workService.graph.acceptTask(f.user.id, task.id, { expectedVersion: task.version, artifactId: artifact.id });
+  const accepted = f.service.detail(f.user.id, task.id).task;
+  assert.equal(accepted.status, 'succeeded');
+  assert.equal(accepted.queueStatus, 'completed');
+  assert.equal(accepted.summary, '结果已通过验收');
+  assert.equal(accepted.needsAttention, false);
+  assert.equal(f.service.snapshot(f.user.id).counts.attention, 0);
+  f.store.db.prepare("UPDATE kibot_jobs SET status='needs_reconciliation' WHERE task_id=? AND run_id IS NULL").run(task.id);
+  const uncertain = f.service.detail(f.user.id, task.id).task;
+  assert.equal(uncertain.queueStatus, 'needs_reconciliation');
+  assert.equal(uncertain.attention.kind, 'reconciliation');
+  assert.equal(uncertain.needsAttention, true);
+});
+
+test('cancellation does not warn about stale uncertainty after execution has been confirmed stopped', async t => {
+  const f = fixture(t);
+  const { task } = await f.delegate('已确认停止的旧执行');
+  await f.service.pump();
+  f.complete(0, 'interrupted');
+  f.store.db.prepare("UPDATE kibot_jobs SET status='needs_reconciliation' WHERE task_id=?").run(task.id);
+  const stopped = await f.service.stop(f.user.id, task.id);
+  assert.equal(stopped.task.status, 'cancelled');
+  assert.equal(stopped.task.queueStatus, 'cancelled');
+  assert.equal(stopped.task.needsAttention, false);
+  assert.equal(stopped.warning, undefined);
+});

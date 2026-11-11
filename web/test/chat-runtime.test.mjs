@@ -404,3 +404,44 @@ test('plain history mapping includes all user/assistant text and never elevates 
   assert.throws(() => prepareChatRequest(messages, 'different', {}), /发生变化/);
   assert.throws(() => prepareChatRequest(Array.from({ length: CHAT_MAX_MESSAGES + 1 }, () => ({ role: 'user', content: 'x' })), 'x', {}), /历史过长/);
 });
+
+test('auto and image turns send original image inputs with genuine editing capability', () => {
+  const text = '把这个图片里的手和腿都改长一些';
+  const messages = [{ role: 'user', content: text }];
+  const file = { name: 'source.png', kind: 'image', mimeType: 'image/png', data: Buffer.from('89504e470d0a1a0a00000000', 'hex') };
+  for (const tool of ['auto', 'image', undefined]) {
+    const payload = prepareChatRequest(messages, text, {}, { tool, files: [file] });
+    assert.equal(payload.input[0].content.find(part => part.type === 'input_image').image_url, 'data:image/png;base64,' + file.data.toString('base64'));
+    assert.deepEqual(payload.tools.find(tool => tool.type === 'image_generation'), { type: 'image_generation', action: tool === 'image' ? 'edit' : 'auto' });
+    assert.match(payload.instructions, /supports both creating and editing images/);
+  }
+  const analysis = prepareChatRequest(messages, text, {}, { tool: 'analyze', files: [file] });
+  assert.ok(!analysis.tools.some(tool => tool.type === 'image_generation'));
+  const reference = prepareChatRequest(messages, text, {}, { tool: 'image', referenceImages: [file] });
+  assert.ok(reference.input[0].content.some(part => part.type === 'input_image'));
+  assert.deepEqual(reference.tool_choice, { type: 'image_generation' });
+});
+
+test('primary image editing uses hosted tools while preserving the independent-task boundary', { timeout: 10000 }, async t => {
+  const f = setup(t), input = primaryInput(f, f.users[0], '再把腿加长一点');
+  const picture = Buffer.from('89504e470d0a1a0a00000000', 'hex');
+  const referenceImages = [{ name: 'reference.png', kind: 'image', mimeType: 'image/png', data: picture }];
+  f.runtime.setPrimaryAssistant(context => {
+    assert.deepEqual(context.referenceImages, referenceImages);
+    return { instructions: 'Keep primary context.', tools: [taskTool], onToolCall: () => { throw new Error('must not delegate'); } };
+  });
+  await f.runtime.start({ ...input, tool: 'image', referenceImages });
+  await until(() => f.calls[0]?.controller);
+  const call = f.calls[0];
+  assert.deepEqual(call.payload.tools, [{ type: 'image_generation', action: 'edit' }]);
+  assert.match(call.payload.instructions, /Keep primary context/);
+  assert.match(call.payload.instructions, /does not disable the hosted tools/);
+  assert.ok(call.payload.input.at(-1).content.some(part => part.type === 'input_image'));
+  const item = { id: 'edited-image', type: 'image_generation_call', status: 'completed', result: picture.toString('base64') };
+  call.controller.enqueue(encode({ type: 'response.completed', response: { output: [item], usage } }));
+  call.controller.close();
+  await until(() => f.store.getRun(input.run.id).status === 'completed');
+  const reply = f.store.getMessages(input.thread.id).at(-1);
+  assert.equal(reply.artifacts.length, 1);
+  assert.deepEqual(Buffer.from(f.store.getChatArtifact(reply.artifacts[0].id, input.user.id).data), picture);
+});

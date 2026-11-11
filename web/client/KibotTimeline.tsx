@@ -3,7 +3,7 @@ import { api, enc, messageOf } from './api';
 import { AttachmentChips, ChatImages, Markdown } from './ChatContent';
 import { Icon, Logo } from './icons';
 import { ErrorBox, Loading } from './ui';
-import type { Message, User } from './types';
+import type { Message, MessageArtifact, User } from './types';
 
 export interface KibotSummary {
   id: string;
@@ -167,13 +167,15 @@ export function useHistoryOverlay(workspace: RefObject<HTMLDivElement | null>) {
   return overlay;
 }
 
-export function KibotHistoryPanel({ summary, timeZone, user, overlay, onClose, returnFocus }: {
+export function KibotHistoryPanel({ summary, timeZone, user, overlay, onClose, returnFocus, onEditImage, editDisabled }: {
   summary: KibotSummary;
   timeZone: string;
   user: User;
   overlay: boolean;
   onClose: () => void;
   returnFocus: RefObject<HTMLButtonElement | null>;
+  onEditImage?: (image: MessageArtifact) => void;
+  editDisabled?: boolean;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [total, setTotal] = useState(summary.messageCount);
@@ -240,9 +242,9 @@ export function KibotHistoryPanel({ summary, timeZone, user, overlay, onClose, r
           <time className="kibot-history-time" dateTime={message.createdAt}>{timeLabel(message.createdAt, timeZone)}</time>
           <div className={'message-avatar' + (message.role === 'assistant' ? ' assistant-avatar logo-container' : '')}>{message.role === 'assistant' ? <Logo /> : message.role === 'user' ? (user.displayName || user.username).slice(0, 1).toUpperCase() : <Icon name="info" size={16} />}</div>
           <div className="message-main"><span className="sr-only">{message.role === 'assistant' ? 'kibot' : message.role === 'user' ? user.displayName || user.username : '系统'}</span>
-            {!!message.attachments?.length && <AttachmentChips files={message.attachments} />}
+            {!!message.attachments?.length && <AttachmentChips files={message.attachments} onEdit={onEditImage} disabled={editDisabled} />}
             {message.role === 'user' ? message.content && <div className="user-message-content">{message.content}</div> : <Markdown content={message.content} citations={message.citations} />}
-            {!!message.artifacts?.length && <ChatImages artifacts={message.artifacts} onLoad={() => undefined} />}
+            {!!message.artifacts?.length && <ChatImages artifacts={message.artifacts} onLoad={() => undefined} onEdit={onEditImage} disabled={editDisabled} />}
           </div>
         </article>)}
         {loading && <Loading label="正在读取原始记录…" />}
