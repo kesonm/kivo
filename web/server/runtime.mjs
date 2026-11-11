@@ -86,10 +86,12 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
   const active = new Map();
   const startingProjects = new Set();
   const startingUsers = new Set();
+  const startingKinds = new Map();
   const startingWaiters = new Map();
   const cancelledRuns = new Set();
   const subscribers = new Map();
   let closing = false;
+  let primaryAssistantFactory = null;
 
   function assertWorkCurrent(state) {
     if (state.workContext) store.work.assertRunCurrent(state.user.id, state.run.id, state.workContext.binding);
@@ -143,9 +145,13 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
   const gateway = gatewayFactory({ store, config, fetchImpl, onStatus: (id, message) => { const s = active.get(id); if (s) log(s, message); } });
   let gatewayReady;
 
-  function assertCapacity() {
+  function assertCapacity({ primary = false } = {}) {
     if (closing) throw new GatewayError('服务正在重启，请稍后重试。', 503);
-    if (active.size + startingProjects.size >= (config.maxConcurrentRuns || 2)) throw new GatewayError('服务器任务已满，请稍后重试。', 429);
+    const count = [...active.values()].filter(state => !!state.isPrimary === primary).length
+      + [...startingKinds.values()].filter(kind => kind === primary).length;
+    // Reserve a separate bounded chat pool so queued work cannot silence kibot.
+    const limit = primary ? Math.max(1, Math.min(4, config.maxConcurrentRuns || 2)) : (config.maxConcurrentRuns || 2);
+    if (count >= limit) throw new GatewayError('服务器任务已满，请稍后重试。', 429);
   }
 
   function revokeGateway(state) {
@@ -376,7 +382,12 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
 
   async function executeChat(state, payload, port) {
     try {
-      await streamChat({ port, token: state.token, payload, signal: state.chatController.signal, chatMode: state.chatMode,
+      const seenCalls = new Set();
+      let calls = 0;
+      for (let round = 0; round < 8; round++) {
+      state.chatController.signal.throwIfAborted();
+      if (state.finishing) return;
+      const result = await streamChat({ port, token: state.token, payload, signal: state.chatController.signal, chatMode: state.chatMode,
         onText: (text, itemId) => appendText(state, text, itemId),
         onImage: artifact => state.artifacts.push(artifact),
         onCitation: citation => state.citations.push(citation),
@@ -386,6 +397,42 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
           if (event.tool === 'image' && event.status === 'succeeded') state.pendingImageActivity.push(event);
           else activity(state, event, event.itemId && `hosted:${event.tool}:${event.itemId}:${event.status}`);
         } });
+      if (!result.functionCalls.length) break;
+      if (!state.applicationTools?.length || !state.onToolCall || round === 7) throw new GatewayError('主助手工具调用达到本次上限，已完成的任务仍会继续，可发送消息查看进展。', 409);
+      // Validate the entire batch before executing any action. No untrusted IDs
+      // or tool names can select a different user's task context.
+      for (const call of result.functionCalls) {
+        if (!state.applicationTools.some(tool => tool.name === call.name) || typeof call.call_id !== 'string'
+          || !/^[A-Za-z0-9_-]{1,200}$/.test(call.call_id) || seenCalls.has(call.call_id)
+          || typeof call.arguments !== 'string' || call.arguments.length > 24000 || ++calls > 24) {
+          throw new GatewayError('主助手返回了无效或重复的工具请求，已停止继续执行。', 502);
+        }
+        try { const args = JSON.parse(call.arguments); if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error(); }
+        catch { throw new GatewayError('主助手工具参数无效，未继续执行。', 502); }
+        seenCalls.add(call.call_id);
+      }
+      const results = [];
+      for (const call of result.functionCalls) {
+        state.chatController.signal.throwIfAborted();
+        if (state.finishing) return;
+        if (store.getRun(state.run.id)?.status !== 'running') throw new GatewayError('本次对话已停止，未继续安排工作。', 409);
+        const account = store.getUser(state.user.id);
+        if (!account || account.disabled || !store.getUserApiKey(state.user.id)) throw new GatewayError('账号或模型凭据已不可用。', 403);
+        const itemId = `primary-${calls}-${results.length}`;
+        activity(state, { kind: 'tool', source: 'hosted', tool: 'tasks', status: 'started', itemId, summary: '正在处理工作安排' });
+        const value = await state.onToolCall({ name: call.name, arguments: call.arguments, callId: call.call_id });
+        const output = JSON.stringify(value ?? null);
+        if (Buffer.byteLength(output) > 65536) throw new GatewayError('任务结果超过上下文限制，请打开任务详情。', 409);
+        results.push({ type: 'function_call_output', call_id: call.call_id, output });
+        activity(state, { kind: 'tool', source: 'hosted', tool: 'tasks', status: value?.error ? 'failed' : 'succeeded', itemId,
+          summary: value?.error ? '工作安排需要进一步处理' : '工作安排已更新' });
+      }
+      // Preserve encrypted reasoning and function call identities for store:false.
+      // Generated image bytes are already saved separately and must not balloon replay.
+      const replay = result.output.map(item => item.type === 'image_generation_call' ? { ...item, result: undefined } : item);
+      payload = { ...payload, input: [...payload.input, ...replay, ...results] };
+      if (Buffer.byteLength(JSON.stringify(payload)) > 2 * 1024 * 1024) throw new GatewayError('主助手本次上下文已满，任务记录已保留，请继续发送消息。', 409);
+      }
       if (!state.finishing) await finish(state, 'completed');
     } catch (error) {
       if (state.finishing) return;
@@ -432,6 +479,10 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
 
   return {
     assertCapacity,
+    setPrimaryAssistant(factory) {
+      if (typeof factory !== 'function') throw new TypeError('Primary assistant factory must be a function');
+      primaryAssistantFactory = factory;
+    },
     providerConfigured: userId => Boolean(userId && store.getApiKeyMetadata(userId)?.configured),
     localResponses(req, res) {
       if (req.headers.origin || req.headers.cookie) { res.statusCode = 403; res.end(); return; }
@@ -464,7 +515,8 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       // Notify only after a state owns execution and before any engine/provider
       // dispatch. The HTTP layer can then release leases on preflight failures
       // while retaining them when a remote start acknowledgement is uncertain.
-      assertCapacity();
+      const isPrimary = project == null && !!thread?.id && store.getThread?.(thread.id)?.isPrimary === true;
+      assertCapacity({ primary: isPrimary });
       const account = user?.id && store.getUser(user.id);
       if (!account || account.disabled) throw new GatewayError('账号已停用。', 403);
       if (!store.getUserApiKey(user.id)) throw new GatewayError('请先在个人设置中填写你的 OpenAI API 密钥。', 409);
@@ -482,10 +534,11 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       if (run.userId !== user.id || thread.userId !== user.id || run.threadId !== thread.id
         || (isChat ? run.projectId !== null || thread.projectId !== null : project.userId !== user.id || run.projectId !== project.id || thread.projectId !== project.id)) throw new GatewayError('无权访问此任务。', 403);
       if ((!isChat && !ID.test(project.id)) || !ID.test(run.id) || !ID.test(thread.id)) throw new GatewayError('无效任务标识。');
-      if (startingUsers.has(user.id) || [...active.values()].some(s => s.user.id === user.id)) throw new GatewayError('你已有任务正在运行，请先停止或等待完成。', 409);
+      const userSlot = `${user.id}:${isPrimary ? 'primary' : 'worker'}`;
+      if (startingUsers.has(userSlot) || [...active.values()].some(s => s.user.id === user.id && !!s.isPrimary === isPrimary)) throw new GatewayError('你已有任务正在运行，请先停止或等待完成。', 409);
       const operationKey = isChat ? `chat:${thread.id}` : project.id;
       if (startingProjects.has(operationKey) || (!isChat && [...active.values()].some(s => s.project?.id === project.id))) throw new GatewayError('该会话或项目已有任务在运行。', 409);
-      startingProjects.add(operationKey); startingUsers.add(user.id);
+      startingProjects.add(operationKey); startingUsers.add(userSlot); startingKinds.set(run.id, isPrimary);
       let resolveStarting;
       const startingDone = new Promise(resolve => { resolveStarting = resolve; });
       startingWaiters.set(run.id, { promise: startingDone, resolve: resolveStarting });
@@ -504,7 +557,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
         checkAccount();
         const state = { kind: 'local', workContext, run, thread, project, user, token: '', output: '', logs: [], pending: new Map(), approvals: new Map(), eventSequence: 0, finishing: null };
         state.token = gateway.authorizeRun({ id: run.id, userId: user.id });
-        active.set(run.id, state); onExecutionStart(); startingProjects.delete(operationKey); startingUsers.delete(user.id);
+        active.set(run.id, state); onExecutionStart(); startingProjects.delete(operationKey); startingUsers.delete(userSlot); startingKinds.delete(run.id);
         state.timeout = setTimeout(() => { void finish(state, 'interrupted', '本地任务达到时长上限。'); }, config.runTimeoutMs || 600_000); state.timeout.unref();
         log(state, '正在连接你的电脑，在本地项目中执行任务…');
         try { await local.projectCall(project, 'run.start', { runId: run.id, codexThreadId: thread.codexThreadId, token: state.token, model: config.model, text, timeoutMs: config.runTimeoutMs }); }
@@ -514,23 +567,31 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       if (isChat) {
         // Validate the full persisted history before acquiring a provider token.
         // This branch never touches project directories or starts Docker.
-        const messages = workContext?.packet.messages ?? (questionContext
+        const primary = isPrimary && primaryAssistantFactory ? await primaryAssistantFactory({ userId: user.id, threadId: thread.id,
+          runId: run.id, messageId: store.getRun(run.id).requestMessageId, text, model, chatMode, tool, files }) : null;
+        const messages = primary?.messages ?? workContext?.packet.messages ?? (questionContext
           ? store.work.getQuestionMessages(user.id, thread.id, { maxMessages: CHAT_MAX_MESSAGES, maxBytes: CHAT_MAX_BYTES })
           : store.getMessagesForContext(thread.id, { maxMessages: CHAT_MAX_MESSAGES, maxBytes: CHAT_MAX_BYTES }));
         if (chatMode === 'ultra' && (files.length || (tool !== undefined && tool !== 'auto'))) {
           throw new GatewayError('Ultra 当前仅支持普通文字聊天。');
         }
-        if (!workContext) runContext.record(run.id, messages.filter(item => ['user','assistant'].includes(item.role) && item.id !== store.getRun(run.id).requestMessageId).map(item => ({ kind: 'message', id: item.id })), { mode: 'chat', lifecycle: 'request' });
+        if (!workContext) runContext.record(run.id, messages.filter(item => item.id && ['user','assistant'].includes(item.role) && item.id !== store.getRun(run.id).requestMessageId).map(item => ({ kind: 'message', id: item.id })), { mode: 'chat', lifecycle: 'request' });
         const payload = prepareChatRequest(messages, text, config, { tool: chatMode === 'ultra' ? undefined : tool, files });
+        // Attachment analysis stays a single request; it cannot replay expiring uploads.
+        const applicationTools = primary && chatMode !== 'ultra' && !files.length && (tool === undefined || tool === 'auto') ? primary.tools ?? [] : [];
+        const hostedTools = payload.tools.map(tool => tool.type);
+        if (primary?.instructions) payload.instructions += '\n\n' + primary.instructions;
+        if (isPrimary && !applicationTools.length) payload.instructions += '\nTask-management tools are unavailable in this mode. Do not claim to create or run tasks; ask the user to use standard automatic text chat for work delegation.';
+        payload.tools.push(...applicationTools);
         if (!gatewayReady) gatewayReady = gateway.start();
         const address = await gatewayReady;
         checkAccount();
-        const state = { kind: 'chat', workContext, questionContext, chatMode, run, thread, project: null, user, token: '', output: '', logs: [], artifacts: [], citations: [], pendingImageActivity: [], pending: new Map(), finishing: null, chatController: new AbortController() };
+        const state = { kind: 'chat', isPrimary, applicationTools, onToolCall: primary?.onToolCall, workContext, questionContext, chatMode, run, thread, project: null, user, token: '', output: '', logs: [], artifacts: [], citations: [], pendingImageActivity: [], pending: new Map(), finishing: null, chatController: new AbortController() };
         state.token = gateway.authorizeRun({ id: run.id, userId: user.id,
-          chatModel: model, reasoningEffort, chatMode, chatTools: payload.tools.map(tool => tool.type),
+          chatModel: model, reasoningEffort, chatMode, chatTools: hostedTools, applicationTools,
           chatFiles: files.filter(file => file.kind === 'table').map(file => ({ ...file, name: file.analysisName ?? file.name })) });
         active.set(run.id, state); onExecutionStart();
-        startingProjects.delete(operationKey); startingUsers.delete(user.id);
+        startingProjects.delete(operationKey); startingUsers.delete(userSlot); startingKinds.delete(run.id);
         state.timeout = setTimeout(() => { void finish(state, 'interrupted', '回复达到运行时长上限，已停止。'); }, config.runTimeoutMs || 20 * 60_000);
         state.timeout.unref();
         log(state, files.length ? '正在准备分析附件…' : '正在生成回复…');
@@ -551,7 +612,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       if (!state.gatewayContainer || !ID.test(state.gatewayContainer)) throw new Error('无法确定模型网关容器标识。');
       state.token = gateway.authorizeRun({ id: run.id, userId: user.id });
       active.set(run.id, state); onExecutionStart();
-      startingProjects.delete(operationKey); startingUsers.delete(user.id);
+      startingProjects.delete(operationKey); startingUsers.delete(userSlot); startingKinds.delete(run.id);
       try {
         state.provisioning = (async () => {
         await execFileImpl('docker', ['network', 'create', '--internal', '--label', 'codex-workspace.run-network=true', state.networkName], { timeout: 15000, maxBuffer: 16 * 1024 });
@@ -625,7 +686,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
         throw new GatewayError(redact(state, error.message), error.status || 502);
       }
       } finally {
-        startingProjects.delete(operationKey); startingUsers.delete(user.id);
+        startingProjects.delete(operationKey); startingUsers.delete(userSlot); startingKinds.delete(run.id);
         if (!active.has(run.id)) cancelledRuns.delete(run.id);
         startingWaiters.delete(run.id); resolveStarting();
       }

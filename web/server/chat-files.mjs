@@ -78,7 +78,7 @@ export async function readChatMultipart(body, contentType) {
       fields.work = selection;
       continue;
     }
-    if (['text', 'tool', 'model', 'reasoningEffort', 'requestId'].includes(key) && typeof value === 'string' && !Object.hasOwn(fields, key)) {
+    if (['text', 'tool', 'model', 'reasoningEffort', 'requestId', 'taskReferenceId'].includes(key) && typeof value === 'string' && !Object.hasOwn(fields, key)) {
       fields[key] = value;
       continue;
     }

@@ -9,6 +9,7 @@ import { Brand, Icon } from './icons';
 import { getDirtyFile } from './navigation';
 import { ErrorBox, Loading, Modal, useDialog, useNotice } from './ui';
 import { useSidebarLayout } from './useSidebarLayout';
+import { taskPriority, taskStatus, useSupervisor } from './Supervisor';
 import type { Project, Session, Thread, User, WorkSnapshot, WorkTask } from './types';
 import './sidebar-layout.css';
 
@@ -37,7 +38,8 @@ export function App() {
   }, []);
   const sidebarLayout = useSidebarLayout(restoreSidebarFocus);
   const { mobile, setSidebarOpen, overlayMode, docked, drawerOpen, visible: sidebarVisible } = sidebarLayout;
-  const [navigationPanel, setNavigationPanel] = useState<'history' | 'new' | 'account' | null>(null);
+  const [navigationPanel, setNavigationPanel] = useState<'history' | 'new' | 'account' | 'tasks' | null>(null);
+  const [taskSearch, setTaskSearch] = useState('');
   const [primary, setPrimary] = useState<{ userId: string; thread: Thread } | null>(null);
   const [primaryLoading, setPrimaryLoading] = useState(true);
   const [primaryError, setPrimaryError] = useState('');
@@ -62,6 +64,7 @@ export function App() {
   const ask = useDialog(); const notify = useNotice();
   const user = session?.user;
   const primaryThread = primary && primary.userId === user?.id ? primary.thread : null;
+  const supervisor = useSupervisor(primaryThread ? user?.id : undefined, threadsRevision);
   const isKibot = !!primaryThread && threadId === primaryThread.id;
   const selectedProject = projects.find(project => project.id === projectId) || null;
   const currentNavigation = navigationRevision.current;
@@ -77,7 +80,7 @@ export function App() {
       ++authEpoch.current; ++navigationRevision.current; ++projectRequest.current; ++taskRequest.current;
       activeLocation.current = { userId: nextUserId, projectId: null, workspaceVersion: activeLocation.current.workspaceVersion + 1, view: 'workspace' };
       setProjects([]); setProjectId(null); setProjectsLoading(false); setProjectsError('');
-      setChats([]); setChatsLoading(false); setChatsError(''); setHistorySearch(''); setProjectSearch('');
+      setChats([]); setChatsLoading(false); setChatsError(''); setHistorySearch(''); setProjectSearch(''); setTaskSearch('');
       setThreadId(null); setWorkspaceVersion(version => version + 1); setView('workspace');
       setPrimary(null); setPrimaryLoading(!!nextUserId); setPrimaryError(''); setInitialTask(undefined);
       setWorkSnapshot(null); setTasksLoading(false); setTasksError(''); setOpeningTask(null);
@@ -190,7 +193,7 @@ export function App() {
     void api<{ threads: Thread[] }>('/api/history').then(result => { if (current()) setRecentThreads(result.threads); })
       .catch(e => { if (current()) setRecentError(messageOf(e)); });
     return () => { cancelled = true; };
-  }, [user?.id, currentAuthEpoch, threadsRevision]);
+  }, [user?.id, currentAuthEpoch, threadsRevision, supervisor.data?.revision]);
   useEffect(() => {
     if (!user?.id || navigationPanel !== 'history') return;
     const userId = user.id, epoch = authEpoch.current;
@@ -278,7 +281,7 @@ export function App() {
     applySession({ user: nextUser, csrfToken: session?.csrfToken || '', providerConfigured: session?.providerConfigured || false, model: session?.model });
     await refreshSession(nextUser.id);
   }
-  async function openTask(task: WorkTask) {
+  async function openTask(task: Pick<WorkTask, 'id'>) {
     if (!(await confirmNavigation())) return;
     const userId = user?.id, location = navigationRevision.current, request = ++taskRequest.current;
     if (!userId || !primaryThread) return;
@@ -287,7 +290,8 @@ export function App() {
     try {
       const detail = await api<{ task: WorkTask; messages: { conversationId: string }[] }>(`/api/work/tasks/${enc(task.id)}`);
       if (!current()) return;
-      const conversationId = [...detail.messages].reverse().find(message => message.conversationId !== primaryThread.id)?.conversationId;
+      const conversationId = supervisor.data?.tasks.find(item => item.id === task.id)?.conversationId
+        ?? [...detail.messages].reverse().find(message => message.conversationId !== primaryThread.id)?.conversationId;
       let thread: Thread;
       if (conversationId) {
         thread = (await api<{ thread: Thread }>(`/api/threads/${enc(conversationId)}`)).thread;
@@ -301,11 +305,12 @@ export function App() {
     } catch (e) { if (current()) notify(messageOf(e), 'error'); }
     finally { if (isCurrentUser()) setOpeningTask(old => old === task.id ? null : old); }
   }
-  function openNavigation(panel: 'history' | 'new' | 'account') {
+  function openNavigation(panel: 'history' | 'new' | 'account' | 'tasks') {
     navigationTrigger.current = document.activeElement as HTMLElement | null;
     setNavigationPanel(panel); setSidebarOpen(false);
     if (panel === 'new') void loadProjects();
     if (panel === 'history') setHistorySearch('');
+    if (panel === 'tasks') setTaskSearch('');
   }
   function openSidebar() {
     if (overlayMode) setSidebarOpen(true);
@@ -315,8 +320,17 @@ export function App() {
     }
   }
   const taskLabels: Record<string, string> = { running: '执行中', waiting_input: '待确认', waiting_approval: '待审批', succeeded: '已完成', failed: '失败', cancelled: '已取消', needs_reconciliation: '待核对', ready: '待执行', paused: '已暂停' };
-  const recentTasks = (workSnapshot?.tasks ?? []).slice(0, 12);
-  const recentConversations = recentThreads.filter(thread => thread.id !== primaryThread?.id).slice(0, 8);
+  const delegatedTasks = new Map(supervisor.data?.tasks.map(task => [task.id, task]) ?? []);
+  const allTasks = [
+    ...(workSnapshot?.tasks ?? []).map(task => ({ id: task.id, goal: task.goal, status: task.status, updatedAt: task.updatedAt,
+      projectId: task.objects.find(object => object.role === 'target')?.projectId, delegated: delegatedTasks.get(task.id) })),
+    ...(supervisor.data?.tasks ?? []).filter(task => !workSnapshot?.tasks.some(item => item.id === task.id))
+      .map(task => ({ id: task.id, goal: task.goal, status: task.status, updatedAt: task.updatedAt, projectId: task.projectId, delegated: task })),
+  ].sort((a, b) => taskPriority(a.delegated ?? { status: a.status, queueStatus: '' }) - taskPriority(b.delegated ?? { status: b.status, queueStatus: '' })
+    || (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
+  const recentTasks = allTasks.slice(0, 12);
+  const delegatedConversations = new Set(supervisor.data?.tasks.map(task => task.conversationId) ?? []);
+  const recentConversations = recentThreads.filter(thread => thread.id !== primaryThread?.id && !delegatedConversations.has(thread.id)).slice(0, 8);
   if (initializing) return <div className="boot-screen"><Brand /><Loading label="正在打开工作空间…" /></div>;
   if (error && !session) return <div className="boot-screen"><Brand /><ErrorBox error={error} onRetry={() => void initialize()} /></div>;
   if (!user) return <Auth onLogin={nextUser => void onLogin(nextUser)} />;
@@ -330,7 +344,7 @@ export function App() {
         onFocusCapture={() => { sidebarFocusWithin.current = true; }} onBlurCapture={event => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) sidebarFocusWithin.current = false; }}>
         <div className="kibot-nav-brand"><Brand /><button ref={sidebarCloseButton} className="icon-button nav-collapse-control" aria-label={overlayMode ? '关闭导航' : '收起侧栏'} title={overlayMode ? '关闭导航' : '收起侧栏'} onClick={() => overlayMode ? setSidebarOpen(false) : sidebarLayout.collapse()}><Icon name={overlayMode ? 'close' : 'panel'} size={18} /></button></div>
         <button className={'kibot-primary-link' + (view === 'workspace' && isKibot ? ' selected' : '')} aria-current={view === 'workspace' && isKibot ? 'page' : undefined}
-          disabled={!primaryThread} onClick={() => primaryThread && void selectThread(primaryThread)}><Icon name="spark" size={24} /><span><strong>kibot</strong><small>你的主对话</small></span></button>
+          disabled={!primaryThread} onClick={() => primaryThread && void selectThread(primaryThread)}><Icon name="spark" size={24} /><span><strong>kibot</strong><small>你的主对话</small></span>{!!supervisor.data?.counts.attention && <span className="supervisor-nav-count" aria-label={`${supervisor.data.counts.attention} 项需要处理`}>{supervisor.data.counts.attention}</span>}</button>
         {primaryError && <ErrorBox error={primaryError} onRetry={() => setPrimaryRetry(value => value + 1)} />}
         <button className="nav-action" onClick={() => openNavigation('history')}><Icon name="search" size={20} /><span>搜索历史</span></button>
         <div className="nav-section-heading"><span>最近任务</span><button className="icon-button" title="新建任务" aria-label="新建任务" onClick={() => openNavigation('new')}><Icon name="plus" size={19} /></button></div>
@@ -339,8 +353,8 @@ export function App() {
           {tasksError && <ErrorBox error={tasksError} onRetry={onThreadsChanged} />}
           {recentTasks.map(task => <button key={task.id} className={'nav-task-row' + (view === 'workspace' && initialTask?.id === task.id ? ' selected' : '')}
             disabled={openingTask !== null || !primaryThread} onClick={() => void openTask(task)} title={task.goal}>
-            <Icon name={task.objects.some(object => object.role === 'target' && object.projectId) ? 'code' : 'chat'} size={18} />
-            <span><strong>{task.goal}</strong><small className="nav-task-status">{openingTask === task.id ? '正在打开…' : taskLabels[task.status] || task.status}{workSnapshot?.mode !== 'enforce' ? ' · 仅查看' : ''}</small></span>
+            <Icon name={task.projectId ? 'code' : 'chat'} size={18} />
+            <span><strong>{task.goal}</strong><small className="nav-task-status">{openingTask === task.id ? '正在打开…' : task.delegated ? taskStatus(task.delegated) : taskLabels[task.status] || task.status}{workSnapshot && workSnapshot.mode !== 'enforce' ? ' · 仅查看' : ''}</small></span>
           </button>)}
           {recentTasks.length > 0 && recentConversations.length > 0 && <div className="nav-legacy-label">独立对话</div>}
           {recentConversations.map(thread => <button key={thread.id} title={thread.title} className={'nav-task-row' + (view === 'workspace' && !initialTask && thread.id === threadId ? ' selected' : '')} onClick={() => void selectThread(thread)}>
@@ -348,7 +362,8 @@ export function App() {
           </button>)}
           {recentError && <ErrorBox error={recentError} onRetry={onThreadsChanged} />}
           {!tasksLoading && !tasksError && !recentError && recentTasks.length === 0 && recentConversations.length === 0 && <p className="nav-empty">还没有独立任务。<br />点击 ＋ 开始，或先和 kibot 聊聊。</p>}
-          {(recentThreads.length > 8 || (workSnapshot?.tasks.length ?? 0) > 12) && <button className="nav-action nav-more" onClick={() => openNavigation('history')}>查看历史对话<Icon name="arrow" size={15} /></button>}
+          {allTasks.length > 0 && <button className="nav-action nav-more" onClick={() => openNavigation('tasks')}>查看全部任务<Icon name="arrow" size={15} /></button>}
+          {recentThreads.length > 8 && <button className="nav-action nav-more" onClick={() => openNavigation('history')}>查看历史对话<Icon name="arrow" size={15} /></button>}
         </div>
         <div className="nav-bottom"><button className="nav-profile" onClick={() => openNavigation('account')} aria-label="个人设置"><span className="sidebar-avatar">{(user.displayName || user.username).slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName || user.username}</strong><small>个人设置</small></span><Icon name="settings" size={18} /></button></div>
         {docked && <div className="nav-resize-handle" {...sidebarLayout.separatorProps}><span className="nav-resize-hint" aria-hidden="true">{sidebarLayout.collapseReady ? '松开收起侧栏' : '拖动调整宽度'}</span></div>}
@@ -358,6 +373,7 @@ export function App() {
         {view === 'workspace' ? (primaryLoading || (!primaryThread && !primaryError)) && !threadId ? <div className="boot-screen"><Loading label="正在打开 kibot…" /></div>
           : primaryError && !threadId ? <div className="boot-screen"><ErrorBox error={primaryError} onRetry={() => setPrimaryRetry(value => value + 1)} /></div>
           : <Workspace key={user.id + ':' + (projectId || 'chat') + ':' + workspaceVersion} project={selectedProject} threadId={threadId} isKibot={isKibot} initialTask={initialTask}
+            supervisor={supervisor.data} supervisorError={supervisor.error} onRefreshSupervisor={supervisor.refresh} onOpenTask={task => void openTask(task)} onShowTasks={() => openNavigation('tasks')}
             onThreadCreated={onThreadCreated} onThreadsChanged={onThreadsChanged} user={user} providerConfigured={!!session?.providerConfigured} model={session?.model} defaultChatModel={session?.defaultChatModel} chatModels={session?.chatModels} refreshSession={refreshSession}
             onRenameProject={() => void renameProject()} onDeleteProject={() => void deleteProject()} onOpenAccount={() => void navigate('account')}
             onOpenLocal={async () => { if (await confirmNavigation()) setLocalDialog('open'); }} />
@@ -374,8 +390,17 @@ export function App() {
         <p className="nav-empty">最多显示最近 100 条匹配记录。</p>
       </div>
     </Modal>}
-    {navigationPanel === 'new' && <Modal title="新建任务" description="独立任务与 kibot 主会话分开保存。需要操作文件时，选择一个项目。" onClose={() => setNavigationPanel(null)}>
-      <div className="nav-dialog-actions"><button className="nav-result-row" onClick={() => void startNewConversation()}><Icon name="chat" /><span><strong>开始独立对话</strong><small>讨论想法、写作或研究</small></span><Icon name="arrow" /></button>
+    {navigationPanel === 'tasks' && <Modal title="全部任务" description="先显示需要你处理和正在执行的工作。" onClose={() => setNavigationPanel(null)}>
+      <div className="nav-search-field"><Icon name="search" /><input autoFocus aria-label="搜索任务" placeholder="搜索任务目标" value={taskSearch} onChange={event => setTaskSearch(event.target.value)} /></div>
+      <div className="nav-dialog-body supervisor-all-list">
+        {tasksError && <ErrorBox error={tasksError} onRetry={onThreadsChanged} />}
+        {allTasks.filter(task => task.goal.toLowerCase().includes(taskSearch.trim().toLowerCase())).map(task => <button className="nav-result-row" key={task.id} disabled={openingTask !== null} onClick={() => void openTask(task)}><Icon name={task.projectId ? 'code' : 'chat'} /><span><strong>{task.goal}</strong><small>{task.delegated ? taskStatus(task.delegated) : taskLabels[task.status] || task.status}</small></span><Icon name="arrow" /></button>)}
+        {!allTasks.some(task => task.goal.toLowerCase().includes(taskSearch.trim().toLowerCase())) && <p className="nav-empty">{taskSearch ? '没有匹配的任务。' : '在 kibot 中交代你想完成的工作，即可开始。'}</p>}
+      </div>
+    </Modal>}
+    {navigationPanel === 'new' && <Modal title="开始新的工作" description="告诉 kibot 目标和要操作的项目，它会建立独立任务并跟进结果。" onClose={() => setNavigationPanel(null)}>
+      <div className="nav-dialog-actions">{primaryThread && <button className="nav-result-row" onClick={() => void selectThread(primaryThread)}><Icon name="spark" /><span><strong>交给 kibot 安排</strong><small>描述目标，执行期间仍可继续交流</small></span><Icon name="arrow" /></button>}
+        <button className="nav-result-row" onClick={() => void startNewConversation()}><Icon name="chat" /><span><strong>开始独立对话</strong><small>讨论想法、写作或研究</small></span><Icon name="arrow" /></button>
         <button className="nav-result-row" disabled={creating} onClick={() => void createProject()}><Icon name="plus" /><span><strong>创建项目</strong><small>在服务器或已配对电脑上创建项目</small></span><Icon name="arrow" /></button>
         <button className="nav-result-row" onClick={async () => { if (await confirmNavigation()) { setNavigationPanel(null); setLocalDialog('open'); } }}><Icon name="terminal" /><span><strong>打开本地项目</strong><small>连接已配对电脑上的现有文件夹</small></span><Icon name="arrow" /></button></div>
       <div className="nav-section-heading"><span>已有项目</span></div>

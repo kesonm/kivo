@@ -1,0 +1,43 @@
+.supervisor-task-card { display:block; width:100%; margin:14px 0 4px; padding:15px 17px; border:1px solid #e5e5e5; border-radius:12px; text-align:left; background:#fff; transition:border-color .15s,box-shadow .15s; }
+.supervisor-task-card:hover { border-color:#bbb; box-shadow:0 3px 15px #00000005; }
+.supervisor-card-heading { display:flex; align-items:flex-start; gap:8px; font-size:13px; }
+.supervisor-card-heading > .icon { margin-top:2px; flex-shrink:0; color:#777; }
+.supervisor-card-heading strong { flex:1; min-width:0; font-weight:550; line-height:1.6; overflow-wrap:anywhere; }
+.supervisor-status { flex-shrink:0; padding:3px 7px; border:1px solid #eee; border-radius:6px; color:#777; font-size:10px; font-weight:400; }
+.supervisor-card-project { display:block; margin:6px 0 0 24px; color:#888; font-size:11px; }
+.supervisor-card-summary { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; font-size:12px; color:#666; line-height:1.8; margin:12px 0; white-space:pre-line; }
+.supervisor-card-link { display:flex; align-items:center; gap:6px; font-size:11px; margin-top:12px; color:#666; }
+.supervisor-task-strip { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin:0 4px 10px; color:#777; font-size:11px; }
+.supervisor-task-strip button { display:inline-flex; align-items:center; gap:5px; padding:5px 8px; border:1px solid #eee; border-radius:7px; }
+.supervisor-task-strip .supervisor-attention { color:#a14c22; }
+.supervisor-reference { display:flex; align-items:center; gap:7px; padding:7px 10px; margin:0 3px 9px; border:1px solid #e5e5e5; border-radius:8px; color:#555; font-size:12px; }
+.supervisor-reference span { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.supervisor-reference .icon-button { width:24px; height:24px; min-width:24px; min-height:24px; }
+.supervisor-ultra-note { display:flex; align-items:center; flex-wrap:wrap; gap:6px; color:#777; font-size:11px; margin:0 5px 9px; line-height:1.6; }
+.supervisor-ultra-note button { text-decoration:underline; text-underline-offset:3px; }
+.supervisor-eyebrow { color:#888; font-size:10px; margin:0 0 9px; }
+.supervisor-panel .kibot-history-header h2 { font-size:16px; overflow-wrap:anywhere; }
+.supervisor-detail-section { margin:0 0 26px; }
+.supervisor-detail-section h3 { font-size:12px; font-weight:550; color:#666; margin:0 0 12px; }
+.supervisor-detail-hint { color:#888; font-size:11px; line-height:1.8; }
+.supervisor-panel-actions { flex-shrink:0; display:flex; flex-wrap:wrap; gap:9px; border-top:1px solid #eee; padding:16px 20px; }
+.supervisor-panel-actions .button { font-size:12px; min-height:36px; }
+.supervisor-panel-actions .error-box { width:100%; }
+.supervisor-stop { color:#a44c4c; margin-left:auto; font-size:11px; }
+.supervisor-artifact { display:flex; align-items:center; gap:9px; padding:12px; border:1px solid #eee; border-radius:8px; margin-bottom:8px; font-size:12px; overflow-wrap:anywhere; }
+.supervisor-artifact small { display:block; margin-top:4px; color:#888; font-size:10px; }
+.supervisor-events { margin:0; padding-left:13px; color:#666; font-size:12px; }
+.supervisor-events li { padding:0 0 16px 6px; line-height:1.7; overflow-wrap:anywhere; }
+.supervisor-events time { display:block; color:#999; font-size:10px; margin-bottom:3px; }
+.supervisor-nav-count { margin-left:auto; display:inline-flex; justify-content:center; align-items:center; min-width:20px; height:20px; border:1px solid #eedbd0; border-radius:6px; color:#9b4c27; font-size:10px; }
+.supervisor-all-list { max-height:60vh; overflow:auto; }
+.supervisor-all-list .supervisor-task-card { margin-top:0; }
+.kibot-composer-note .text-button { margin-left:12px; font-size:10px; color:#777; }
+.supervisor-memory { max-height:65vh; overflow:auto; }
+.supervisor-memory-note { padding:15px; border:1px solid #eee; border-radius:10px; margin:0 0 12px; }
+.supervisor-memory-note > div { display:flex; justify-content:space-between; gap:12px; color:#888; font-size:10px; }
+.supervisor-memory-note p { font-size:13px; line-height:1.8; white-space:pre-wrap; overflow-wrap:anywhere; }
+.supervisor-memory-note > button { color:#777; font-size:11px; }
+.kibot-primary-link > span:first-of-type { min-width:0; }
+@media (prefers-reduced-motion:reduce) { .supervisor-task-card { transition:none; } }
+@media (max-width:520px) { .supervisor-card-heading { flex-wrap:wrap; } .supervisor-card-heading strong { min-width:130px; } .supervisor-panel-actions { padding:13px 16px; } }

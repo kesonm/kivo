@@ -165,6 +165,110 @@ test('ordinary chats enforce user-one and global-two concurrency across chat and
   assert.equal(f.calls.length, 2);
 });
 
+function primaryInput(f, user = f.users[0], text = '安排工作') {
+  const input = f.create(user, text);
+  f.store.db.prepare('INSERT INTO kibot_threads(user_id,thread_id) VALUES(?,?)').run(user.id, input.thread.id);
+  input.thread = f.store.getThread(input.thread.id);
+  const messageId = f.store.getMessages(input.thread.id).at(-1).id;
+  f.store.updateRun(input.run.id, { requestMessageId: messageId });
+  return input;
+}
+const taskTool = { type: 'function', name: 'kivo_list_work', description: 'Read owned work', strict: true,
+  parameters: { type: 'object', properties: {}, required: [], additionalProperties: false } };
+const functionTurn = (id = 'call_1', name = taskTool.name) => ({ type: 'response.completed', response: { usage, output: [
+  { type: 'reasoning', id: 'reasoning_1', summary: [], encrypted_content: 'opaque-provider-reasoning' },
+  { type: 'function_call', id: 'fc_1', call_id: id, name, arguments: '{}' },
+] } });
+
+test('primary chat has bounded reserved capacity alongside workers, with one primary per user', { timeout: 10000 }, async t => {
+  const f = setup(t);
+  const workers = [f.create(f.users[0]), f.create(f.users[1])];
+  await f.runtime.start(workers[0]); await f.runtime.start(workers[1]);
+  const primary = primaryInput(f);
+  await f.runtime.start(primary);
+  const second = primaryInput(f, f.users[1]);
+  await f.runtime.start(second);
+  await until(() => f.calls.length === 4);
+  const third = primaryInput(f, f.users[2]);
+  await assert.rejects(f.runtime.start(third), error => error.status === 429);
+  f.store.updateRun(third.run.id, { status: 'failed' });
+  await f.runtime.interrupt(second.run.id);
+  assert.throws(() => f.store.createRun(primary.thread.id, primary.user.id), error => error.status === 409);
+  await assert.rejects(f.runtime.start({ ...primary, run: { ...primary.run, id: 'duplicate-primary' } }), error => error.status === 409);
+  await Promise.all([...workers, primary].map(input => f.runtime.interrupt(input.run.id)));
+});
+
+test('primary tool round trip replays encrypted reasoning, scopes calls and accounts every model request', { timeout: 10000 }, async t => {
+  const f = setup(t), input = primaryInput(f), executed = [];
+  f.runtime.setPrimaryAssistant(context => {
+    assert.equal(context.userId, input.user.id); assert.equal(context.messageId, f.store.getRun(input.run.id).requestMessageId);
+    return { messages: f.store.getMessages(input.thread.id), instructions: 'Coordinate owned tasks.', tools: [taskTool],
+      onToolCall: async call => { executed.push(call); return { tasks: [{ id: 'owned-task', status: 'queued' }] }; } };
+  });
+  await f.runtime.start({ ...input, tool: 'auto' });
+  await until(() => f.calls[0]?.controller);
+  assert.ok(f.calls[0].payload.tools.some(tool => tool.name === taskTool.name));
+  assert.deepEqual(f.calls[0].payload.include, ['reasoning.encrypted_content']);
+  assert.equal(f.calls[0].payload.parallel_tool_calls, false);
+  f.calls[0].controller.enqueue(encode(functionTurn())); f.calls[0].controller.close();
+  await until(() => f.calls[1]?.controller);
+  assert.deepEqual(executed, [{ name: taskTool.name, arguments: '{}', callId: 'call_1' }]);
+  assert.ok(f.calls[1].payload.input.some(item => item.encrypted_content === 'opaque-provider-reasoning'));
+  assert.ok(f.calls[1].payload.input.some(item => item.type === 'function_call_output' && JSON.parse(item.output).tasks[0].id === 'owned-task'));
+  f.calls[1].controller.enqueue(encode(terminal('工作已安排。'))); f.calls[1].controller.close();
+  await until(() => f.store.getRun(input.run.id).status === 'completed');
+  assert.equal(f.store.getRun(input.run.id).output, '工作已安排。');
+  assert.equal(f.store.getUsage({ userId: input.user.id }).totals.totalTokens, 30);
+  assert.equal(f.store.getUsage({ userId: input.user.id }).usage.length, 2);
+});
+
+test('primary tools reject unknown or replayed calls before repeating any action', { timeout: 10000 }, async t => {
+  const f = setup(t), input = primaryInput(f); let executed = 0;
+  f.runtime.setPrimaryAssistant(() => ({ tools: [taskTool], onToolCall: async () => { executed++; return {}; } }));
+  await f.runtime.start(input); await until(() => f.calls[0]?.controller);
+  f.calls[0].controller.enqueue(encode(functionTurn())); f.calls[0].controller.close();
+  await until(() => f.calls[1]?.controller);
+  f.calls[1].controller.enqueue(encode(functionTurn())); f.calls[1].controller.close();
+  await until(() => f.store.getRun(input.run.id).status === 'failed');
+  assert.equal(executed, 1); assert.equal(f.calls.length, 2);
+  assert.match(f.store.getRun(input.run.id).error, /重复/);
+});
+
+test('Ultra primary keeps memory but never obtains application-tool capabilities', { timeout: 10000 }, async t => {
+  const f = setup(t, { config: { model: 'gpt-6.1-sol' } }), input = primaryInput(f);
+  f.runtime.setPrimaryAssistant(() => ({ instructions: 'Primary memory is supplied.', tools: [taskTool], onToolCall: () => { throw new Error('must not execute'); } }));
+  await f.runtime.start({ ...input, chatMode: 'ultra' }); await until(() => f.calls[0]?.controller);
+  assert.deepEqual(f.calls[0].payload.tools, []);
+  assert.match(f.calls[0].payload.instructions, /Primary memory is supplied/);
+  assert.match(f.calls[0].payload.instructions, /Task-management tools are unavailable/);
+  f.calls[0].controller.enqueue(encode({ type: 'response.completed', response: { usage, output: [agentMessage('answer', '/root', '分析完成')] } }));
+  f.calls[0].controller.close(); await until(() => f.store.getRun(input.run.id).status === 'completed');
+});
+
+test('ordinary threads cannot impersonate kibot or obtain application tools', { timeout: 10000 }, async t => {
+  const f = setup(t), input = f.create(); let factoryCalls = 0;
+  f.runtime.setPrimaryAssistant(() => { factoryCalls++; return { tools: [taskTool], onToolCall: () => ({}) }; });
+  await f.runtime.start({ ...input, thread: { ...input.thread, isPrimary: true } });
+  await until(() => f.calls[0]?.controller);
+  assert.equal(factoryCalls, 0);
+  assert.ok(f.calls[0].payload.tools.every(tool => tool.type !== 'function'));
+  f.calls[0].controller.enqueue(encode(terminal('普通聊天'))); f.calls[0].controller.close();
+  await until(() => f.store.getRun(input.run.id).status === 'completed');
+});
+
+test('primary refuses an unknown tool and never executes a streamed call before completion', { timeout: 10000 }, async t => {
+  const f = setup(t), input = primaryInput(f); let executed = 0;
+  f.runtime.setPrimaryAssistant(() => ({ tools: [taskTool], onToolCall: async () => { executed++; return {}; } }));
+  await f.runtime.start(input); await until(() => f.calls[0]?.controller);
+  f.calls[0].controller.enqueue(encode({ type: 'response.output_item.done', output_index: 0,
+    item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: taskTool.name, arguments: '{}' } }));
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(executed, 0);
+  f.calls[0].controller.enqueue(encode(functionTurn('call_2', 'kivo_delete_everything'))); f.calls[0].controller.close();
+  await until(() => f.store.getRun(input.run.id).status === 'failed');
+  assert.equal(executed, 0); assert.equal(f.calls.length, 1);
+});
+
 test('ordinary chat rejects oversized complete history before starting provider calls', async t => {
   const f = setup(t), input = f.create();
   f.store.appendMessage(input.thread.id, 'assistant', 'x'.repeat(CHAT_MAX_BYTES));

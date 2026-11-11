@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { api, ApiError, dateTime, enc, messageOf } from './api';
 import { ChatComposer } from './ChatComposer';
 import { AttachmentChips, ChatImages, Markdown } from './ChatContent';
@@ -9,9 +9,10 @@ import { LocalApprovals } from './Local';
 import { PreviousTask, VerificationCard, useRunActivity } from './RunActivity';
 import { RunDetails } from './RunContext';
 import { WorkContext, taskTarget } from './WorkContext';
+import { MemoryDialog, TaskCard, TaskPanel, taskPriority } from './Supervisor';
 import { dateInZone, KibotHistoryPanel, KibotSummaryList, useHistoryOverlay, useKibotTimeline, type KibotSummary } from './KibotTimeline';
 import { ErrorBox, Loading, StatusBadge, useDialog, useNotice } from './ui';
-import type { ChatModelOption, ChatTool, Message, Project, ReasoningEffort, Run, RunEvent, RunVerification, Thread, User, WorkRoute, WorkSelection, WorkSnapshot, WorkTask } from './types';
+import type { ChatModelOption, ChatTool, Message, Project, ReasoningEffort, Run, RunEvent, RunVerification, Thread, User, WorkRoute, WorkSelection, WorkSnapshot, WorkTask, SupervisorSnapshot, SupervisorTask } from './types';
 
 const chatFileCount = 4;
 const chatFileBytes = 8 * 1024 * 1024;
@@ -26,11 +27,13 @@ const chatStarters = [
   { icon: 'edit', title: '润色文字', text: '我想润色一段文字。请先问我文字的用途和希望的语气。' },
 ];
 
-export function Workspace({ project: conversationProject, threadId, onThreadCreated, onThreadsChanged, user, providerConfigured, model, defaultChatModel, chatModels, refreshSession, onRenameProject, onDeleteProject, onOpenAccount, onOpenLocal, isKibot = false, initialTask }: {
+export function Workspace({ project: conversationProject, threadId, onThreadCreated, onThreadsChanged, user, providerConfigured, model, defaultChatModel, chatModels, refreshSession, onRenameProject, onDeleteProject, onOpenAccount, onOpenLocal, isKibot = false, initialTask, supervisor, supervisorError, onRefreshSupervisor, onOpenTask, onShowTasks }: {
   project: Project | null; threadId: string | null; onThreadCreated: (thread: Thread) => void; onThreadsChanged: () => void;
   user: User; providerConfigured: boolean; model?: string; defaultChatModel?: string; chatModels?: ChatModelOption[]; refreshSession: () => Promise<void>;
   onRenameProject: () => void; onDeleteProject: () => void; onOpenAccount: () => void; onOpenLocal: () => void;
   isKibot?: boolean; initialTask?: WorkTask;
+  supervisor?: SupervisorSnapshot | null; supervisorError?: string; onRefreshSupervisor?: () => void;
+  onOpenTask?: (task: SupervisorTask) => void; onShowTasks?: () => void;
 }) {
   const [replyLinks,setReplyLinks] = useState<{messageId:string;runId:string}[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -61,6 +64,11 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
   const [ownedProjects, setOwnedProjects] = useState<Project[]>([]);
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [historySummary, setHistorySummary] = useState<KibotSummary | null>(null);
+  const [selectedTask, setSelectedTask] = useState<SupervisorTask | null>(null);
+  const [taskReference, setTaskReference] = useState<SupervisorTask | null>(null);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const taskTrigger = useRef<HTMLButtonElement | null>(null);
+  const supervisorLoadedSignature = useRef('');
   const historyTrigger = useRef<HTMLButtonElement | null>(null);
   const workspaceElement = useRef<HTMLDivElement | null>(null);
   const historyOverlay = useHistoryOverlay(workspaceElement);
@@ -95,7 +103,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
   const running = run?.status === 'running';
   const taskUnavailable = !!initialTask && (!work || work.mode !== 'enforce');
   const composerBusy = loading || sending || running || taskUnavailable || isKibot && !work;
-  const timeline = useKibotTimeline(threadId, user.id, isKibot, `${revision}:${run?.id ?? ''}:${run?.status ?? ''}:${messages.at(-1)?.id ?? ''}`);
+  const timeline = useKibotTimeline(threadId, user.id, isKibot, `${revision}:${run?.id ?? ''}:${run?.status ?? ''}:${messages.at(-1)?.id ?? ''}:${supervisor?.revision ?? ''}`);
   useEffect(() => {
     if (!isKibot || !timeline.data || !historySummary) return;
     const latest = timeline.data.summaries.find(summary => summary.id === historySummary.id);
@@ -171,7 +179,15 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
     finally { if (mounted.current && sequence === loadSequence.current) setLoading(false); }
   }, [isKibot, timeline.timeZone]);
   useEffect(() => {
-    if (!isKibot || !timeline.data || !threadId) return;
+    if (!isKibot || !threadId || supervisor?.revision === undefined || running || sending || sendingRef.current) return;
+    const signature = `${threadId}:${supervisor.revision}`;
+    if (supervisorLoadedSignature.current === signature) return;
+    let cancelled = false;
+    void loadThread(threadId).then(loaded => { if (loaded && !cancelled) supervisorLoadedSignature.current = signature; });
+    return () => { cancelled = true; };
+  }, [isKibot, threadId, supervisor?.revision, running, sending, loadThread]);
+  useEffect(() => {
+    if (!isKibot || !timeline.data || !threadId || running || sending) return;
     const ids = timeline.data.activeMessageIds;
     const signature = `${threadId}:${ids.length}:${ids[0] ?? ''}:${ids.at(-1) ?? ''}`;
     if (signature === timelineLoadedSignature.current || signature === timelinePendingSignature.current) return;
@@ -183,11 +199,12 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
       // On failure the next timeline poll retries. Ref-only cleanup deliberately
       // avoids a state-driven retry loop during a prolonged network failure.
     });
-  }, [isKibot, threadId, timeline.data, messages, loadThread]);
+  }, [isKibot, threadId, timeline.data, messages, loadThread, running, sending]);
   useEffect(() => {
     pinBottom.current = true; setError(''); setConnectionLost(false);
     if (threadId !== newlyCreatedThread.current) {
       setInput('');
+      setTaskReference(null); setSelectedTask(null); setMemoryOpen(false);
       setVerificationOpen(false);
       setVerificationCommand('');
       setAttachments([]);
@@ -289,7 +306,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
       if (work?.mode === 'enforce') {
         // Keep the same request identity and focus version after an uncertain
         // network result. A draft/selection change creates a distinct request.
-        const fingerprint = JSON.stringify({ conversationId: id, text, work: workSelection, tool: chatTool, model: chatModel?.id, reasoningEffort, ultra, check });
+        const fingerprint = JSON.stringify({ conversationId: id, text, work: workSelection, tool: chatTool, model: chatModel?.id, reasoningEffort, ultra, check, taskReferenceId: isKibot ? taskReference?.id : undefined });
         const previous = sendAttempt.current;
         if (!previous || previous.fingerprint !== fingerprint || previous.files.length !== attachments.length || previous.files.some((file, index) => file !== attachments[index])) {
           sendAttempt.current = { fingerprint, files: [...attachments], requestId: crypto.randomUUID(), work: workRequest };
@@ -297,11 +314,12 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
         requestId = sendAttempt.current!.requestId;
         workRequest = sendAttempt.current!.work;
       }
-      let body: { text: string; tool?: ChatTool; model?: string; mode?: 'ultra'; reasoningEffort?: ReasoningEffort; verificationCommand?: string; requestId?: string; work?: WorkSelection | { focusRevision: number } } | FormData = project
+      let body: { text: string; tool?: ChatTool; model?: string; mode?: 'ultra'; reasoningEffort?: ReasoningEffort; verificationCommand?: string; requestId?: string; work?: WorkSelection | { focusRevision: number }; taskReferenceId?: string } | FormData = project
         ? { text, ...(check ? { verificationCommand: check } : {}) }
         : { text, tool: chatTool, model: chatModel?.id, ...(ultra ? { mode: 'ultra' } : { reasoningEffort }) };
       if (workRequest) body.work = workRequest;
       if (requestId) body.requestId = requestId;
+      if (isKibot && taskReference) body.taskReferenceId = taskReference.id;
       if (hasFiles) {
         const form = new FormData();
         form.set('text', text);
@@ -310,6 +328,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
         if (reasoningEffort) form.set('reasoningEffort', reasoningEffort);
         if (work?.mode === 'enforce' && (isKibot || workSelection?.intent === 'question')) form.set('work', JSON.stringify({ intent: 'question', focusRevision: workRequest?.focusRevision ?? work?.focus?.revision ?? 0 }));
         if (requestId) form.set('requestId', requestId);
+        if (isKibot && taskReference) form.set('taskReferenceId', taskReference.id);
         for (const file of attachments) form.append('files', file);
         body = form;
       }
@@ -318,7 +337,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
       const result = await api<{ run: Run }>(`/api/threads/${enc(id)}/turns`, { method: 'POST', body: requestBody });
       onThreadsChanged();
       if (!mounted.current || threadRef.current !== id) return;
-      setInput(''); setVerificationOpen(false); setVerificationCommand('');
+      setInput(''); setVerificationOpen(false); setVerificationCommand(''); setTaskReference(null);
       sendAttempt.current = null;
       setAttachments([]); setSelectedTool('auto'); setRun(result.run);
       setWorkSelection(undefined); setWorkRoute(null); void refreshWork();
@@ -404,8 +423,29 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
   const lastAssistant = [...visibleMessages].reverse().find(message => message.role === 'assistant');
   const showRunOutput = run && runVisible && (running || (!!run.output && lastAssistant?.content !== run.output));
   const emptyConversation = !isKibot && !loading && messages.length === 0 && !run;
+  function openTaskDetail(task: SupervisorTask, trigger: HTMLButtonElement) {
+    taskTrigger.current = trigger; setHistorySummary(null); setSelectedTask(task);
+  }
+  function referenceTask(task: SupervisorTask) {
+    setSelectedTask(null); setTaskReference(task);
+    window.requestAnimationFrame(() => textarea.current?.focus());
+  }
+  const displayedTask = selectedTask && (supervisor?.tasks.find(task => task.id === selectedTask.id) ?? selectedTask);
+  const tasksAtMessage = (messageId: string) => (supervisor?.tasks ?? []).filter(task => {
+    const related = task.messageIds?.length ? task.messageIds : [task.originMessageId];
+    return [...related].reverse().find(id => visibleMessages.some(message => message.id === id)) === messageId;
+  });
   const composer = <div className="composer-area">
     {isKibot && workError && <ErrorBox error={workError} onRetry={() => void refreshWork()} />}
+    {isKibot && supervisorError && <ErrorBox error={'任务状态暂未更新：' + supervisorError} onRetry={onRefreshSupervisor} />}
+    {isKibot && supervisor && supervisor.tasks.length > 0 && <div className="supervisor-task-strip" aria-label="后台任务状态">
+      {!!supervisor.counts.running && <button onClick={onShowTasks}><Icon name="activity" size={13} />进行中 {supervisor.counts.running}</button>}
+      {!!supervisor.counts.queued && <button onClick={onShowTasks}><Icon name="clock" size={13} />排队中 {supervisor.counts.queued}</button>}
+      {!!supervisor.counts.attention && <button className="supervisor-attention" onClick={event => { const task = supervisor.tasks.find(task => taskPriority(task) === 0); if (task) openTaskDetail(task, event.currentTarget); else onShowTasks?.(); }}><Icon name="info" size={13} />需要你处理 {supervisor.counts.attention}</button>}
+      <button onClick={onShowTasks}>全部任务<Icon name="chevron" size={12} /></button>
+    </div>}
+    {isKibot && taskReference && <div className="supervisor-reference"><Icon name="chat" size={14} /><span>关于：{taskReference.goal}</span><button className="icon-button" aria-label="取消引用任务" onClick={() => setTaskReference(null)}><Icon name="close" size={13} /></button></div>}
+    {isKibot && ultra && <p className="supervisor-ultra-note">Ultra 用于分析；安排任务请切换普通档位。<button type="button" onClick={() => setUltraSelected(false)}>切换普通档位</button></p>}
     {scrolledUp && !emptyConversation && <button className="scroll-bottom" onClick={() => { pinBottom.current = true; scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: 'smooth' }); }}><Icon name="down" size={16} />回到最新消息</button>}
     {connectionLost && <div className="connection-note"><span className="spinner" />连接已断开，正在自动恢复任务状态…</div>}
     {error && <ErrorBox error={error} onRetry={threadId ? () => void loadThread(threadId, true) : undefined} />}
@@ -435,16 +475,16 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
       onOpenReasoning={() => void refreshSession().catch(() => undefined)} threadId={threadId} providerConfigured={providerConfigured}
       busy={composerBusy} running={running} sending={sending} stopping={stopping} onSend={send} onStop={() => void interrupt()} onOpenLocal={onOpenLocal}
       workRestricted={hasWorkContext} voiceRestricted={!isKibot && work?.mode === 'enforce' && !!work.task} onBusyChange={setVoiceBusy}
-      placeholder={isKibot ? '和 kibot 说说你的下一步…' : undefined} />}
+      placeholder={isKibot ? taskReference ? '补充要求，或询问这项任务的进展…' : '和 kibot 说说你想完成什么…' : undefined} />}
     {hasWorkContext && !project && <p className="work-composer-note">正在处理持续任务。附件和实时语音请在工作上下文中切换到普通问答后使用。</p>}
     <div className="composer-footer">{project && <button type="button" className="composer-project" onClick={() => void changePanel(true)} title="查看项目文件"><Icon name="folder" size={13} /><span>{project.name}{project.location === 'local' ? ' · 本地电脑' : ' · 云端'}</span></button>}
       {cloudProject && <button type="button" className="composer-verification-toggle" aria-expanded={verificationOpen} aria-controls={verificationOpen ? 'project-verification-command' : undefined}
         onClick={() => setVerificationOpen(open => !open)} disabled={composerBusy}><Icon name="check" size={13} />{verificationCommand.trim() ? '已填写验收命令' : '验收命令'}</button>}
       <span>管理员可查看会话与执行记录</span><span className="composer-shortcut">Shift + Enter 换行</span></div>
-    {isKibot && <p className="kibot-composer-note">历史保留，摘要仅折叠展示。</p>}
+    {isKibot && <p className="kibot-composer-note">历史保留，摘要仅折叠展示。<button className="text-button" onClick={() => { setSelectedTask(null); setHistorySummary(null); setMemoryOpen(true); }}>工作记忆</button></p>}
   </div>;
   return <div ref={workspaceElement} className={'workspace-body' + (panelOpen ? ' with-panel' : '') + (isKibot ? ' kibot-workspace' : '') + (historySummary ? ' kibot-history-open' : '')}>
-    <section className={'chat-panel' + (emptyConversation ? ' chat-panel-empty' : '')} aria-label={isKibot ? 'kibot 主会话' : undefined} inert={!!historySummary && historyOverlay || undefined}>
+    <section className={'chat-panel' + (emptyConversation ? ' chat-panel-empty' : '')} aria-label={isKibot ? 'kibot 主会话' : undefined} inert={(!!historySummary || !!selectedTask) && historyOverlay || memoryOpen || undefined}>
       {!isKibot && <header className={'workspace-header' + (project ? '' : ' workspace-header-chat')}>
         <div className="breadcrumb"><span>{project?.name || 'kivo'}</span><Icon name="chevron" size={14} /><strong>{title || '新的对话'}</strong></div>
         {project && <><div className="workspace-mode-switch" role="group" aria-label="界面模式"><button className={!panelOpen ? 'selected' : ''} aria-pressed={!panelOpen} onClick={() => void changePanel(false)}><Icon name="chat" size={15} />聊天</button><button className={panelOpen ? 'selected' : ''} aria-pressed={panelOpen} onClick={() => void changePanel(true)}><Icon name="code" size={16} />工作</button></div>
@@ -460,10 +500,10 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
       <div className={'chat-stage' + (emptyConversation ? ' chat-stage-empty' : '')}>
         {emptyConversation ? <div className="chat-welcome"><h1>今天想做些什么？</h1></div> : <div className="messages-scroll" ref={scroll} onScroll={() => { if (scroll.current) { const near = scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight < 160; pinBottom.current = near; setScrolledUp(!near); } }}>
           {loading ? <Loading label="正在加载对话…" /> : <div className="messages-list">
-            {isKibot && <KibotSummaryList timeline={timeline} selectedId={historySummary?.id} onOpen={(summary, trigger) => { historyTrigger.current = trigger; setHistorySummary(summary); }} onBeforeLoadMore={() => { pinBottom.current = false; }} />}
+            {isKibot && <KibotSummaryList timeline={timeline} selectedId={historySummary?.id} onOpen={(summary, trigger) => { historyTrigger.current = trigger; setSelectedTask(null); setHistorySummary(summary); }} onBeforeLoadMore={() => { pinBottom.current = false; }} />}
             {isKibot && timeline.data && <div className="kibot-current-divider"><span>当前对话</span></div>}
-            {isKibot && timeline.data && !visibleMessages.length && !running && <div className="kibot-current-empty"><span className="assistant-avatar logo-container"><Logo /></span><div><strong>{timeline.data.summaries.length ? '之前的进展已整理好。' : '你好，我是 kibot。'}</strong><p>{timeline.data.summaries.length ? '接下来想推进哪件事？' : '在这里聊想法、定方向。独立工作可以从左侧「最近任务」开始。'}</p></div></div>}
-            {visibleMessages.map(message => <article key={message.id} className={'chat-message message-' + message.role}>
+            {isKibot && timeline.data && !visibleMessages.length && !running && <div className="kibot-current-empty"><span className="assistant-avatar logo-container"><Logo /></span><div><strong>{timeline.data.summaries.length ? '之前的进展已整理好。' : '你好，我是 kibot。'}</strong><p>{timeline.data.summaries.length ? '接下来想推进哪件事？' : '告诉我你的目标和要操作的项目，我会安排任务、跟进结果。'}</p></div></div>}
+            {visibleMessages.map(message => <Fragment key={message.id}><article className={'chat-message message-' + message.role}>
               <div className={'message-avatar' + (message.role === 'assistant' ? ' assistant-avatar logo-container' : '')}>
                 {message.role === 'assistant' ? <Logo /> : message.role === 'user' ? (user.displayName || user.username).slice(0, 1).toUpperCase() : <Icon name="info" size={17} />}
               </div>
@@ -482,7 +522,7 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
                 </>}
                 {message.role === 'assistant' && replyLinks.find(link=>link.messageId===message.id) && <RunDetails key={replyLinks.find(link=>link.messageId===message.id)!.runId} runId={replyLinks.find(link=>link.messageId===message.id)!.runId} live={run?.id===replyLinks.find(link=>link.messageId===message.id)!.runId?run:undefined} events={activity} error={activityError} refresh={refreshActivity}/>}
               </div>
-            </article>)}
+            </article>{isKibot && tasksAtMessage(message.id).map(task => <TaskCard key={task.id} task={task} onOpen={openTaskDetail} />)}</Fragment>)}
             {showRunOutput && <article className="chat-message message-assistant"><div className="message-avatar assistant-avatar logo-container"><Logo /></div><div className="message-main"><div className="message-heading"><strong>{isKibot ? 'kibot' : 'kivo'}</strong><StatusBadge status={run.status} /></div>{run.output ? <Markdown content={run.output} /> : <div className="thinking"><span /><span /><span /><small>正在处理你的任务</small></div>}</div></article>}
             {run && runVisible && <>
               <VerificationCard run={run} onOpenDiff={project && run.projectId === project.id && !running ? openCurrentDiff : undefined} />
@@ -504,6 +544,8 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
       </div>
     </section>
     {isKibot && historySummary && <KibotHistoryPanel key={`${user.id}:${historySummary.id}:${historySummary.endAt}:${historySummary.messageCount}`} summary={historySummary} timeZone={timeline.timeZone} user={user} overlay={historyOverlay} returnFocus={historyTrigger} onClose={() => setHistorySummary(null)} />}
+    {isKibot && displayedTask && <TaskPanel key={displayedTask.id} task={displayedTask} revision={supervisor?.revision} overlay={historyOverlay} returnFocus={taskTrigger} onClose={() => setSelectedTask(null)} onReference={referenceTask} onOpenConversation={task => onOpenTask?.(task)} onRefresh={() => onRefreshSupervisor?.()} />}
+    {isKibot && memoryOpen && <MemoryDialog onClose={() => setMemoryOpen(false)} />}
     {project && panelOpen && <Files project={project} revision={revision} locked={!!running} tab={panelTab} onTabChange={setPanelTab} onClose={closePanel} />}
   </div>;
 }

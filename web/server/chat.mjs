@@ -87,7 +87,8 @@ export async function streamChat({ port, token, payload, signal, chatMode, onTex
   const partOffsets = new Map(), outputIds = new Map(), seenImages = new Set(), annotations = new Map();
   const activities = new Map();
   const ultra = chatMode === 'ultra' ? createUltraOutput({ onText, onActivity }) : null;
-  let imageBytes = 0, terminal = null, providerError = null;
+  let imageBytes = 0, terminal = null, providerError = null, output = null;
+  const completedItems = new Map();
   function itemKey(event) {
     const index = event.output_index ?? 0;
     const id = event.item_id ?? event.item?.id;
@@ -166,6 +167,7 @@ export async function streamChat({ port, token, payload, signal, chatMode, onTex
   const parser = makeSseParser(event => {
     if (ultra) ultra.event(event);
     if (['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event.type)) {
+      if (Array.isArray(event.response?.output)) output = event.response.output;
       if (!ultra) for (const [index, item] of (event.response?.output || []).entries()) emitItem(item, index);
       terminal = event.type;
       if (event.type === 'response.incomplete') providerError = '本次回复达到模型输出限制或未完整生成，已保留收到的内容。';
@@ -187,6 +189,7 @@ export async function streamChat({ port, token, payload, signal, chatMode, onTex
       const key = itemKey(event);
       trackTool(event.item?.type, key, 'started');
     } else if (event.type === 'response.output_item.done') {
+      if (event.item) completedItems.set(event.output_index ?? completedItems.size, event.item);
       emitItem(event.item, event.output_index);
     } else if (event.type === 'response.output_text.annotation.added') {
       noteCitation(event.annotation, itemKey(event) + ':' + (event.content_index ?? 0));
@@ -210,4 +213,6 @@ export async function streamChat({ port, token, payload, signal, chatMode, onTex
   if (providerError) throw new GatewayError(providerError, 502);
   if (terminal !== 'response.completed') throw new GatewayError('模型连接已中断，未收到完整回复；未返回的用量会标记为未知。', 502);
   if (ultra && !ultra.received) throw new GatewayError('Ultra 未返回主代理的最终答复，可以切换到 Max 重试。', 502);
+  output ??= [...completedItems.entries()].sort((a, b) => a[0] - b[0]).map(([, item]) => item);
+  return { output, functionCalls: output.filter(item => item?.type === 'function_call') };
 }

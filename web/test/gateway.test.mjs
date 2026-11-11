@@ -24,15 +24,50 @@ function fakeStore() {
   };
 }
 
-async function fixture(t, fetchImpl, { chatTools, chatFiles, report = () => {} } = {}) {
+async function fixture(t, fetchImpl, { chatTools, chatFiles, applicationTools, report = () => {} } = {}) {
   const store = fakeStore();
   const gateway = createGateway({ store, config, fetchImpl, report });
   const address = await gateway.start();
-  const token = gateway.authorizeRun({ id: 'run', userId: 'u', chatTools, chatFiles });
+  const token = gateway.authorizeRun({ id: 'run', userId: 'u', chatTools, chatFiles, applicationTools });
   t.after(() => gateway.close());
   const request = (body = { input: 'Hello' }, extra = {}) => fetch(`http://127.0.0.1:${address.port}/v1/responses`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...extra }, body: JSON.stringify(body) });
   return { store, gateway, request, address, token };
 }
+
+const primaryTool = { type: 'function', name: 'kivo_list_work', description: 'Read owned tasks', strict: true,
+  parameters: { type: 'object', properties: {}, required: [], additionalProperties: false } };
+
+test('application tool authority is capability-bound and cannot be supplied or changed in a request', async t => {
+  const calls = [];
+  const f = await fixture(t, async (url, options) => { calls.push(JSON.parse(options.body)); return stream([completed()]); },
+    { chatTools: [], applicationTools: [primaryTool] });
+  const ordinary = f.gateway.authorizeRun({ id: 'ordinary', userId: 'u', chatTools: [] });
+  let response = await f.request({ input: [{ role: 'user', content: 'work' }], tools: [primaryTool] }, { authorization: `Bearer ${ordinary}` });
+  assert.equal(response.status, 400); await response.text();
+  response = await f.request({ input: [{ role: 'user', content: 'work' }], tools: [{ ...primaryTool, description: 'altered instructions' }] });
+  assert.equal(response.status, 400); await response.text();
+  assert.equal(calls.length, 0);
+  response = await f.request({ input: [{ role: 'user', content: 'work' }], tools: [primaryTool] });
+  assert.equal(response.status, 200); await response.text();
+  assert.deepEqual(calls[0].tools, [primaryTool]);
+  assert.deepEqual(calls[0].include, ['reasoning.encrypted_content']);
+  assert.equal(calls[0].parallel_tool_calls, false);
+});
+
+test('primary gateway bounds repeated calls and allows owned function history with encrypted reasoning', async t => {
+  const f = await fixture(t, async () => stream([completed()]), { chatTools: [], applicationTools: [primaryTool] });
+  const input = [{ role: 'user', content: 'work' },
+    { type: 'reasoning', id: 'rs1', summary: [], encrypted_content: 'opaque' },
+    { type: 'function_call', call_id: 'c1', name: primaryTool.name, arguments: '{}' },
+    { type: 'function_call_output', call_id: 'c1', output: '{"tasks":[]}' }];
+  for (let i = 0; i < 8; i++) {
+    const response = await f.request({ input, tools: [primaryTool] });
+    assert.equal(response.status, 200); await response.text();
+  }
+  const exhausted = await f.request({ input, tools: [primaryTool] });
+  assert.equal(exhausted.status, 429); await exhausted.text();
+  assert.equal(f.store.usage.length, 8);
+});
 
 test('usage uses actual provider total with a single direct inference request', async t => {
   const calls = [];

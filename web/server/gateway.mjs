@@ -60,12 +60,24 @@ function validDataUrl(value, acceptsMime) {
   return data.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(data);
 }
 
-function prepareChatInput(input) {
+function prepareChatInput(input, applicationTools = new Map()) {
   if (typeof input === 'string') return input;
   return input.map(item => {
+    if (applicationTools.size && item && !item.role) {
+      if (item.type === 'function_call' && applicationTools.has(item.name)
+        && typeof item.call_id === 'string' && item.call_id.length <= 200
+        && typeof item.arguments === 'string' && item.arguments.length <= 24000) return item;
+      if (item.type === 'function_call_output' && typeof item.call_id === 'string' && item.call_id.length <= 200
+        && typeof item.output === 'string' && Buffer.byteLength(item.output) <= 65536) return item;
+      if (item.type === 'reasoning' && (item.encrypted_content === undefined || typeof item.encrypted_content === 'string')) return item;
+      if (['web_search_call', 'image_generation_call'].includes(item.type)) return item;
+      throw new GatewayError('不支持的主助手工具记录。');
+    }
     if (!item || !['user', 'assistant'].includes(item.role) || (item.type && item.type !== 'message')) throw new GatewayError('不支持的聊天消息。');
     const { role, content } = item;
     if (typeof content === 'string') return { role, content };
+    if (applicationTools.size && role === 'assistant' && Array.isArray(content)
+      && content.every(part => ['output_text', 'refusal'].includes(part?.type))) return item;
     if (!Array.isArray(content) || role !== 'user') throw new GatewayError('不支持的聊天内容。');
     return { role, content: content.map(part => {
       if (part?.type === 'input_text' && typeof part.text === 'string') return { type: part.type, text: part.text };
@@ -80,10 +92,12 @@ function prepareChatInput(input) {
   });
 }
 
-function prepareChatPayload(body, chatTools) {
+function prepareChatPayload(body, chatTools, applicationTools = new Map()) {
   const tools = body.tools ?? [];
-  if (!Array.isArray(tools) || tools.some(tool => !CHAT_TOOLS.has(tool?.type) || !chatTools.has(tool.type))
-    || new Set(tools.map(tool => tool.type)).size !== tools.length) {
+  if (!Array.isArray(tools) || tools.some(tool => tool?.type === 'function'
+    ? !applicationTools.has(tool.name) || JSON.stringify(tool) !== JSON.stringify(applicationTools.get(tool.name))
+    : !CHAT_TOOLS.has(tool?.type) || !chatTools.has(tool.type))
+    || new Set(tools.map(tool => tool.type === 'function' ? tool.name : tool.type)).size !== tools.length) {
     throw new GatewayError('聊天请求包含未授权的工具。');
   }
   const toolChoice = body.tool_choice ?? 'auto';
@@ -92,9 +106,11 @@ function prepareChatPayload(body, chatTools) {
     throw new GatewayError('聊天请求选择了未启用的工具。');
   }
   return {
-    input: prepareChatInput(body.input),
+    input: prepareChatInput(body.input, applicationTools),
     instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
-    tools: tools.map(({ type }) => type === 'code_interpreter' ? { type, container: { type: 'auto' } } : { type }),
+    tools: tools.map(tool => tool.type === 'function' ? applicationTools.get(tool.name)
+      : tool.type === 'code_interpreter' ? { type: tool.type, container: { type: 'auto' } } : { type: tool.type }),
+    ...(applicationTools.size ? { parallel_tool_calls: false } : {}),
     tool_choice: tools.length ? (chosenType ? { type: chosenType } : toolChoice) : undefined,
   };
 }
@@ -117,17 +133,17 @@ function prepareRunnerPayload(body) {
   return payload;
 }
 
-export function prepareResponseRequest(body, config, chatTools) {
+export function prepareResponseRequest(body, config, chatTools, applicationTools = new Map()) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new GatewayError('无效模型请求。');
   if (body.previous_response_id || body.conversation || body.background) throw new GatewayError('不支持跨请求的供应商会话引用。');
   if (body.input == null || (typeof body.input !== 'string' && !Array.isArray(body.input))) throw new GatewayError('缺少模型输入。');
-  const payload = chatTools ? prepareChatPayload(body, chatTools) : prepareRunnerPayload(body);
+  const payload = chatTools ? prepareChatPayload(body, chatTools, applicationTools) : prepareRunnerPayload(body);
   payload.model = config.model;
   payload.store = false;
   payload.stream = true;
   payload.truncation = 'disabled';
   // Encrypted reasoning is returned by the provider and replayed with the isolated thread.
-  if (!chatTools) payload.include = ['reasoning.encrypted_content'];
+  if (!chatTools || applicationTools.size) payload.include = ['reasoning.encrypted_content'];
   const configuredMax = Math.max(256, Math.min(32768, Number(config.maxOutputTokens) || 4096));
   payload.max_output_tokens = Number.isSafeInteger(body.max_output_tokens) && body.max_output_tokens > 0
     ? Math.min(body.max_output_tokens, configuredMax) : configuredMax;
@@ -250,11 +266,16 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
   const activeRequests = new Set();
   let server, listening;
 
-  function authorizeRun({ id, userId, chatTools, chatFiles = [], chatModel, reasoningEffort, chatMode }) {
+  function authorizeRun({ id, userId, chatTools, chatFiles = [], chatModel, reasoningEffort, chatMode, applicationTools = [] }) {
     if (chatTools !== undefined && (!Array.isArray(chatTools) || chatTools.some(type => !CHAT_TOOLS.has(type)))) {
       throw new GatewayError('无效的聊天工具权限。');
     }
     const files = validateChatFiles(chatFiles);
+    if (!Array.isArray(applicationTools) || applicationTools.length > 12 || applicationTools.some(tool => tool?.type !== 'function'
+      || !/^kivo_[a-z_]{1,60}$/.test(tool.name) || !tool.parameters || tool.parameters.type !== 'object')
+      || new Set(applicationTools.map(tool => tool.name)).size !== applicationTools.length
+      || Buffer.byteLength(JSON.stringify(applicationTools)) > 65536) throw new GatewayError('无效的主助手工具权限。');
+    if (applicationTools.length && (!chatTools || files.length || chatMode === 'ultra')) throw new GatewayError('此模式不支持主助手任务工具。');
     if (files.length && !chatTools?.includes('code_interpreter')) throw new GatewayError('未启用文件分析工具。');
     if (!chatTools && (chatModel !== undefined || reasoningEffort !== undefined || chatMode !== undefined)) throw new GatewayError('该聊天配置不可用于项目任务。');
     if (chatMode === 'ultra' && chatTools.length) throw new GatewayError('Ultra 当前仅支持普通文字聊天。');
@@ -262,7 +283,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       ? resolveChatSelection(store.getChatModelCatalog(config.model), chatModel, reasoningEffort, chatMode)
       : { model: config.model };
     const token = randomBytes(32).toString('base64url');
-    capabilities.set(token, { runId: id, userId, ...selection, chatTools: chatTools && new Set(chatTools), chatFiles: files, expires: Date.now() + (config.runTimeoutMs || 20 * 60_000) + 60_000, inFlight: false, requestCount: 0, controllers: new Set(), tasks: new Set() });
+    capabilities.set(token, { runId: id, userId, ...selection, applicationTools: new Map(applicationTools.map(tool => [tool.name, structuredClone(tool)])), chatTools: chatTools && new Set(chatTools), chatFiles: files, expires: Date.now() + (config.runTimeoutMs || 20 * 60_000) + 60_000, inFlight: false, requestCount: 0, controllers: new Set(), tasks: new Set() });
     return token;
   }
 
@@ -334,10 +355,10 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       if (req.method !== 'POST' || req.url !== '/v1/responses') throw new GatewayError('不支持的模型接口。', 404);
       if (req.headers.origin) throw new GatewayError('模型网关不接受浏览器请求。', 403);
       if (cap.inFlight) throw new GatewayError('同一任务已有模型请求在运行。', 429);
-      if (++cap.requestCount > (cap.chatTools ? 1 : 80)) throw new GatewayError('单任务模型调用次数已达限制，请继续新的任务。', 429);
+      if (++cap.requestCount > (cap.applicationTools.size ? 8 : cap.chatTools ? 1 : 80)) throw new GatewayError('单任务模型调用次数已达限制，请继续新的任务。', 429);
       cap.inFlight = true; ownsLock = true;
       const body = await readJson(req, cap.chatTools ? CHAT_GATEWAY_MAX_REQUEST_BYTES : MAX_REQUEST_BYTES);
-      const payload = prepareResponseRequest(body, config, cap.chatTools);
+      const payload = prepareResponseRequest(body, config, cap.chatTools, cap.applicationTools);
       payload.model = cap.model;
       if (cap.chatTools) {
         if (cap.reasoningEffort !== undefined) payload.reasoning = { effort: cap.reasoningEffort };

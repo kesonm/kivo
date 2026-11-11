@@ -103,3 +103,23 @@ export interface WorkSnapshot {
   decisions?: { id?: string; status?: string; reason?: string; createdAt?: string; intent?: string }[];
   artifacts?: { id: string; name?: string; title?: string; version: number; status?: string; verificationStatus?: string }[];
 }
+
+export interface SupervisorTask {
+  id: string; goal: string; status: string; queueStatus: string;
+  conversationId: string; originMessageId: string; projectId?: string | null; projectName?: string | null;
+  messageIds?: string[];
+  latestRunId?: string | null; updatedAt: string; summary?: string; version?: number;
+  result?: string; pendingFollowUp?: boolean;
+  artifacts?: SupervisorArtifact[];
+}
+export interface SupervisorArtifact {
+  id: string; name?: string; title?: string; url?: string; version?: number; status?: string;
+}
+export interface SupervisorSnapshot {
+  tasks: SupervisorTask[]; counts: { queued: number; running: number; attention: number }; revision: string | number;
+}
+export interface SupervisorDetail {
+  task: SupervisorTask;
+  artifacts?: SupervisorArtifact[];
+  events?: { id?: string; type?: string; kind?: string; summary?: string; createdAt?: string; status?: string }[];
+}
