@@ -144,9 +144,11 @@ export function prepareResponseRequest(body, config, chatTools, applicationTools
   payload.truncation = 'disabled';
   // Encrypted reasoning is returned by the provider and replayed with the isolated thread.
   if (!chatTools || applicationTools.size) payload.include = ['reasoning.encrypted_content'];
-  const configuredMax = Math.max(256, Math.min(32768, Number(config.maxOutputTokens) || 4096));
-  payload.max_output_tokens = Number.isSafeInteger(body.max_output_tokens) && body.max_output_tokens > 0
-    ? Math.min(body.max_output_tokens, configuredMax) : configuredMax;
+  const configuredMax = Number.isSafeInteger(config.maxOutputTokens) && config.maxOutputTokens > 0 ? config.maxOutputTokens : undefined;
+  const requestedMax = Number.isSafeInteger(body.max_output_tokens) && body.max_output_tokens > 0 ? body.max_output_tokens : undefined;
+  const maxOutputTokens = configuredMax === undefined ? requestedMax
+    : requestedMax === undefined ? configuredMax : Math.min(requestedMax, configuredMax);
+  if (maxOutputTokens !== undefined) payload.max_output_tokens = maxOutputTokens;
   if (body.prompt_cache_key) payload.prompt_cache_key = undefined; // never share user-selected cache identifiers
   return payload;
 }

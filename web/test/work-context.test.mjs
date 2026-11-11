@@ -99,3 +99,11 @@ test('invalid model budgets fail configuration validation instead of returning a
     assert.throws(() => contextBudget({ maxOutputTokens: 2000, workModelBudgets: { invalid: limits } }, 'invalid'), error => error.code === 'work_budget_invalid');
   }
 });
+
+test('unset output limits do not invent a 4096-token reservation in task context', () => {
+  const unknown = contextBudget({ workContextBytes: 32_000 }, 'unknown');
+  assert.equal(unknown.outputTokens, null); assert.equal(unknown.maxBytes, 32_000);
+  const known = contextBudget({ workContextBytes: 32_000,
+    workModelBudgets: { known: { inputTokens: 8000, contextTokens: 10000 } } }, 'known');
+  assert.equal(known.outputTokens, null); assert.equal(known.maxBytes, 5952);
+});

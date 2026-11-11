@@ -82,6 +82,8 @@ Store `createThread(null,userId,title)` and `listStandaloneThreads(userId)` hand
 
 Runtime `providerConfigured(userId)` checks only user credentials. Gateway capability binds user+run. Every upstream request retrieves `store.getUserApiKey(cap.userId)` and never falls back to global configuration. Runtime workers get only a short-lived gateway capability.
 
+Output tokens follow provider defaults unless explicitly limited. An absent/blank `MAX_OUTPUT_TOKENS` leaves `max_output_tokens` absent from chat and gateway requests; explicit configuration must be a positive safe integer. The gateway preserves valid request limits and applies the smaller value only when an explicit server limit also exists. There is no 4096 fallback or 32768 clamp. Existing deployments must remove their old explicit environment value to opt into provider defaults. Provider/model limits, request timeouts, output-byte bounds and tool-loop bounds still apply independently.
+
 `store.beginUsage(userId,runId,{model,keyLast4})` starts a request record. `settleUsage(id,{status,inputTokens,outputTokens,totalTokens})` is idempotent; statuses completed/unknown/failed, only completed usage enters actual totals. No input-token-count preflight, reservations or platform deductions. Interrupted requests without reliable usage remain unknown rather than becoming zero or estimated cost. Legacy usage stays readable and legacy estimated rows are excluded from actual totals.
 
 ## Boundaries

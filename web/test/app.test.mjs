@@ -319,6 +319,12 @@ test('a user can change their own password while all prior sessions are revoked'
   assert.equal((await a.request('GET','/api/session')).data.user.username,'alice');assert.equal((await other.request('GET','/api/projects')).status,401);
 });
 
+test('output tokens default to provider behavior and explicit limits must be positive safe integers',()=>{
+  for(const value of [undefined,'','  '])assert.equal(loadConfig({MAX_OUTPUT_TOKENS:value}).maxOutputTokens,undefined);
+  for(const value of ['4096','65536','131072'])assert.equal(loadConfig({MAX_OUTPUT_TOKENS:value}).maxOutputTokens,Number(value));
+  for(const value of ['0','-1','1.5','NaN','Infinity','9007199254740992','invalid'])assert.throws(()=>loadConfig({MAX_OUTPUT_TOKENS:value}),/MAX_OUTPUT_TOKENS/);
+});
+
 test('proxy trust defaults off and accepts only explicitly listed proxy IPs',()=>{
   assert.equal(loadConfig({}).trustProxy,false);assert.equal('apiKey'in loadConfig({OPENAI_API_KEY:keyA}),false);
   assert.deepEqual(loadConfig({TRUST_PROXY_IPS:'172.18.0.1, 172.19.0.1,172.18.0.1,::1'}).trustProxy,['172.18.0.1','172.19.0.1','::1']);

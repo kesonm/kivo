@@ -49,6 +49,8 @@ function verificationCommandFor(value, project) {
 
 export function loadConfig(env=process.env){
   const int=(name,fallback,min=1,max=1e9)=>{const n=Number(env[name]??fallback);if(!Number.isInteger(n)||n<min||n>max)throw new Error(`${name} must be an integer between ${min} and ${max}`);return n;};
+  const maxOutputTokens=env.MAX_OUTPUT_TOKENS==null||String(env.MAX_OUTPUT_TOKENS).trim()===''
+    ?undefined:int('MAX_OUTPUT_TOKENS',undefined,1,Number.MAX_SAFE_INTEGER);
   const dataDir=path.resolve(env.DATA_DIR??'./data');
   const trustedProxyIps=[...new Set((env.TRUST_PROXY_IPS??'').split(',').map(value=>value.trim()).filter(Boolean))];
   if(trustedProxyIps.length>32||trustedProxyIps.some(value=>!isIP(value)))throw new Error('TRUST_PROXY_IPS must contain only explicit IPv4 or IPv6 addresses separated by commas');
@@ -63,7 +65,7 @@ export function loadConfig(env=process.env){
     runnerImage:env.RUNNER_IMAGE??'codex-workspace-runner:0.167.0',runnerUid:int('RUNNER_UID',1000,0),runnerGid:int('RUNNER_GID',1000,0),
     model:env.CODEX_MODEL??'gpt-6.1-sol',credentialsKeyFile:env.CREDENTIALS_KEY_FILE??'/run/secrets/credentials-key',
     openaiBaseUrl:'https://api.openai.com/v1',gatewayPort:int('GATEWAY_PORT',3001,1,65535),gatewayHost:env.GATEWAY_HOST??'0.0.0.0',
-    maxOutputTokens:int('MAX_OUTPUT_TOKENS',8192,256,65536),maxConcurrentRuns:int('MAX_CONCURRENT_RUNS',2,1,16),
+    maxOutputTokens,maxConcurrentRuns:int('MAX_CONCURRENT_RUNS',2,1,16),
     runTimeoutMs:int('RUN_TIMEOUT_MS',600000,1000,3600000),
     workRoutingMode,workModelBudgets,workContextBytes:int('WORK_CONTEXT_BYTES',393216,8192,500000),
     publicOrigin:env.PUBLIC_ORIGIN??'',cookieSecure:env.COOKIE_SECURE!=='false',trustProxy:trustedProxyIps.length?trustedProxyIps:false,

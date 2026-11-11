@@ -94,7 +94,7 @@ Responses 每次只提交本次组装的上下文，不伪造持久供应商 thr
 
 Run completed 只表示一次执行结束。任务没有独立验收时进入 `waiting_input`。只有已持久化的独立检查成功结果，或用户通过 accept 明确确认当前具体产物版本，才能成为 `succeeded`。人工验收保存 `authority=user_acceptance`、操作者、产物版本和审计，不伪造测试退出码。存在未停止执行、租约、已取消任务或 stale 产物时拒绝人工验收。
 
-`WORK_CONTEXT_BYTES` 默认 `393216` 字节。`WORK_MODEL_BUDGETS` 可配置 `{ "model-id": { "contextTokens": 123456, "inputTokens": 100000 } }`，必须填已核实的模型限制；不会根据名称猜测窗口。显式配置扣除输出预算和固定指令/工具预留后，以 UTF-8 字节上界保守控制输入，不是精确 tokenizer 测量。未配置的模型只使用应用字节上限。
+`WORK_CONTEXT_BYTES` 默认 `393216` 字节。`WORK_MODEL_BUDGETS` 可配置 `{ "model-id": { "contextTokens": 123456, "inputTokens": 100000 } }`，必须填已核实的模型限制；不会根据名称猜测窗口。仅在显式设置 `MAX_OUTPUT_TOKENS` 时扣除该输出预算，否则 manifest 的 `outputTokens` 为 `null`，不再猜测 4096 预留；此时 `inputTokens` 应为模型输出留足空间。扣除固定指令/工具预留后，以 UTF-8 字节上界保守控制输入，不是精确 tokenizer 测量。未配置的模型只使用应用字节上限。
 
 持续任务超过字节预算、超过允许历史条数或历史读取不完整时返回 `work_context_budget`，保留原始记录并停止执行，不静默删除约束。普通问答沿用 200 条/512 KiB 限制。两条路径均**没有自动压缩或模型摘要压缩**；任务清单和干净线程重建也不能称为原生压缩。
 

@@ -4,14 +4,16 @@ import { AppError } from './store.mjs';
 // application's byte ceiling, without inventing a provider token window.
 export function contextBudget(config, model) {
   const limits = config.workModelBudgets?.[model];
-  const outputTokens = config.maxOutputTokens || 4096;
+  const outputTokens = Number.isSafeInteger(config.maxOutputTokens) && config.maxOutputTokens > 0 ? config.maxOutputTokens : null;
+  const reservedOutputTokens = outputTokens ?? 0;
   const byteCeiling = config.workContextBytes || 384 * 1024;
   if (!limits) return { model, maxBytes: byteCeiling, outputTokens, tokenWindow: null, basis: 'application_bytes' };
   if (!Number.isSafeInteger(limits.inputTokens) || !Number.isSafeInteger(limits.contextTokens)
-    || limits.inputTokens <= 2048 || limits.contextTokens <= outputTokens + 2048) throw new AppError('此模型的上下文预算配置无效', 503, 'work_budget_invalid');
+    || limits.inputTokens <= 2048 || limits.contextTokens <= reservedOutputTokens + 2048) throw new AppError('此模型的上下文预算配置无效', 503, 'work_budget_invalid');
   // A conservative UTF-8 byte upper bound, not a tokenizer measurement. Reserve
-  // space for fixed instructions and tools as well as the requested output.
-  const available = Math.min(limits.inputTokens, limits.contextTokens - outputTokens) - 2048;
+  // space for fixed instructions/tools and an explicit output budget, if any.
+  // Without one, inputTokens must leave appropriate room for provider output.
+  const available = Math.min(limits.inputTokens, limits.contextTokens - reservedOutputTokens) - 2048;
   return { model, maxBytes: Math.min(byteCeiling, available), outputTokens, tokenWindow: limits.contextTokens, basis: 'configured_model_byte_upper_bound' };
 }
 

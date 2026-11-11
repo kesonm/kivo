@@ -24,9 +24,9 @@ function fakeStore() {
   };
 }
 
-async function fixture(t, fetchImpl, { chatTools, chatFiles, applicationTools, report = () => {} } = {}) {
+async function fixture(t, fetchImpl, { chatTools, chatFiles, applicationTools, configOverrides = {}, report = () => {} } = {}) {
   const store = fakeStore();
-  const gateway = createGateway({ store, config, fetchImpl, report });
+  const gateway = createGateway({ store, config: { ...config, ...configOverrides }, fetchImpl, report });
   const address = await gateway.start();
   const token = gateway.authorizeRun({ id: 'run', userId: 'u', chatTools, chatFiles, applicationTools });
   t.after(() => gateway.close());
@@ -85,6 +85,46 @@ test('usage uses actual provider total with a single direct inference request', 
   assert.equal(f.store.usage[0].totalTokens, 120);
   assert.equal(f.store.usage[0].keyLast4, '0001');
   assert.equal(f.store.usage[0].status, 'completed');
+});
+
+test('chat and runner requests omit an unconfigured output limit from the upstream payload', async t => {
+  for (const chatTools of [undefined, []]) {
+    const calls = [];
+    const f = await fixture(t, async (url, options) => {
+      calls.push(JSON.parse(options.body));
+      return stream([completed()]);
+    }, { chatTools, configOverrides: { maxOutputTokens: undefined } });
+    const response = await f.request({ input: 'Hello' });
+    assert.equal(response.status, 200); await response.text();
+    assert.equal(calls.length, 1);
+    assert.equal(Object.hasOwn(calls[0], 'max_output_tokens'), false);
+    assert.equal(f.store.usage[0].totalTokens, 120);
+  }
+});
+
+test('explicit output limits preserve values above the old gateway ceiling and use the tighter limit', () => {
+  const unconfigured = { model: 'test-model' };
+  for (const chatTools of [undefined, new Set()]) {
+    for (const limit of [16, 65536, 131072]) {
+      assert.equal(prepareResponseRequest({ input: 'Hi' }, { ...unconfigured, maxOutputTokens: limit }, chatTools).max_output_tokens, limit);
+      assert.equal(prepareResponseRequest({ input: 'Hi', max_output_tokens: limit }, unconfigured, chatTools).max_output_tokens, limit);
+    }
+    assert.equal(prepareResponseRequest({ input: 'Hi', max_output_tokens: 131072 }, { ...unconfigured, maxOutputTokens: 65536 }, chatTools).max_output_tokens, 65536);
+    assert.equal(prepareResponseRequest({ input: 'Hi', max_output_tokens: 65536 }, { ...unconfigured, maxOutputTokens: 131072 }, chatTools).max_output_tokens, 65536);
+  }
+});
+
+test('invalid output limits are not forwarded and cannot replace a valid explicit limit', () => {
+  const invalid = [undefined, null, 0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '4096', true, {}, []];
+  for (const chatTools of [undefined, new Set()]) {
+    for (const value of invalid) {
+      const request = { input: 'Hi', max_output_tokens: value };
+      const unconfigured = { model: 'test-model', maxOutputTokens: value };
+      assert.equal(Object.hasOwn(prepareResponseRequest(request, unconfigured, chatTools), 'max_output_tokens'), false);
+      assert.equal(prepareResponseRequest(request, config, chatTools).max_output_tokens, 512);
+      assert.equal(prepareResponseRequest({ input: 'Hi', max_output_tokens: 65536 }, unconfigured, chatTools).max_output_tokens, 65536);
+    }
+  }
 });
 
 test('capabilities select only their own user key and preserve key suffix snapshots', async t => {

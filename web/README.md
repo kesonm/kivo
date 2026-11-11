@@ -4,6 +4,12 @@ Cloudflare 免费 Worker + 现有 Ubuntu 完整功能部署见 [Cloudflare 部�
 
 基于 OpenAI Responses API 与官方 Codex app-server 的多用户浏览器工作台。部署地址：<https://kivo.iptnet.xyz>。官方仓库源码保留在上级目录，网页服务位于 `web/`，执行器固定使用 `@openai/codex@0.167.0`。
 
+## 模型输出额度（1.15.1）
+
+Web 层默认不向 Responses 请求添加 `max_output_tokens`，由模型服务使用自身输出上限。普通对话、kibot 主会话与工具循环、Ultra，以及经网关的 Codex 执行器遵循同一规则。`MAX_OUTPUT_TOKENS` 未设置或为空时不施加应用额度；需要时可显式配置正安全整数，网关与请求都指定时取较小值，不再额外封顶为 32768。模型支持范围仍由上游验证。
+
+已有部署升级时必须移除 `/etc/codex-web/app.env` 中旧的 `MAX_OUTPUT_TOKENS=4096`，否则它仍然是有效的显式配置。请求时长、上下文字节、工具循环次数与执行隔离规则仍独立生效。此变更不修复上游网络断流，也不自动重跑历史失败任务。
+
 ## 跨会话工作连续性
 
 本轮提供阶段 1–3 基础实现：独立工作对象和 Task、明确目标与只读参考、跨对话上下文、产物版本依赖、执行租约和人工验收。普通问答仍可直接发送，不额外调用路由模型。配置默认 `WORK_ROUTING_MODE=shadow`；启用方式、HTTP 契约、上下文预算、迁移和验收覆盖见 [工作连续性说明](WORK_CONTINUITY.md)。原生自动压缩、持久多 Worker 和可信外部事件入口尚未实现。

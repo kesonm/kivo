@@ -47,6 +47,24 @@ function setup(t, { fetchImpl, config: overrides = {} } = {}) {
   return { store, runtime, calls, users, create, config };
 }
 
+test('standard and Ultra chats leave output limits to the provider and account usage beyond 4096', { timeout: 10000 }, async t => {
+  const f = setup(t, { config: { model: 'gpt-6.1-sol', maxOutputTokens: undefined } });
+  for (const chatMode of ['standard', 'ultra']) {
+    const input = f.create(), index = f.calls.length;
+    await f.runtime.start({ ...input, chatMode }); await until(() => f.calls[index]?.controller);
+    const call = f.calls[index];
+    assert.equal(Object.hasOwn(call.payload, 'max_output_tokens'), false);
+    call.controller.enqueue(encode({ type: 'response.completed', response: {
+      output: [agentMessage('answer', '/root', '完整答复')],
+      usage: { input_tokens: 100, output_tokens: 8192, total_tokens: 8292 },
+    } }));
+    call.controller.close(); await until(() => f.store.getRun(input.run.id).status !== 'running');
+    assert.equal(f.store.getRun(input.run.id).status, 'completed');
+    assert.equal(f.store.getMessages(input.thread.id).at(-1).content, '完整答复');
+  }
+  assert.deepEqual(f.store.getUsage({ userId: f.users[0].id }).usage.map(row => row.outputTokens), [8192, 8192]);
+});
+
 test('plain chat cancellation settles unknown usage once and retains streamed text without Docker', { timeout: 10000 }, async t => {
   const f = setup(t), input = f.create(), events = [];
   f.runtime.subscribe(input.run.id, event => events.push(event));
@@ -199,7 +217,7 @@ test('primary chat has bounded reserved capacity alongside workers, with one pri
 });
 
 test('primary tool round trip replays encrypted reasoning, scopes calls and accounts every model request', { timeout: 10000 }, async t => {
-  const f = setup(t), input = primaryInput(f), executed = [];
+  const f = setup(t, { config: { maxOutputTokens: undefined } }), input = primaryInput(f), executed = [];
   f.runtime.setPrimaryAssistant(context => {
     assert.equal(context.userId, input.user.id); assert.equal(context.messageId, f.store.getRun(input.run.id).requestMessageId);
     return { messages: f.store.getMessages(input.thread.id), instructions: 'Coordinate owned tasks.', tools: [taskTool],
@@ -220,6 +238,7 @@ test('primary tool round trip replays encrypted reasoning, scopes calls and acco
   assert.equal(f.store.getRun(input.run.id).output, '工作已安排。');
   assert.equal(f.store.getUsage({ userId: input.user.id }).totals.totalTokens, 30);
   assert.equal(f.store.getUsage({ userId: input.user.id }).usage.length, 2);
+  assert.ok(f.calls.every(call => !Object.hasOwn(call.payload, 'max_output_tokens')));
 });
 
 test('primary tools reject unknown or replayed calls before repeating any action', { timeout: 10000 }, async t => {
