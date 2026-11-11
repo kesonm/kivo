@@ -80,6 +80,9 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
   const verificationInput = useRef<HTMLInputElement>(null);
   const pinBottom = useRef(true);
   const threadRef = useRef(threadId); threadRef.current = threadId;
+  const titleRef = useRef(title); titleRef.current = title;
+  const titleMetadata = useRef<Pick<Thread, 'id' | 'title' | 'titleUpdatedAt' | 'updatedAt'> | null>(null);
+  const titleReadSequence = useRef(0), appliedTitleSequence = useRef(0);
   const newlyCreatedThread = useRef<string | null>(null);
   const loadSequence = useRef(0);
   const workSequence = useRef(0);
@@ -167,17 +170,28 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
     setWorkSelection({ intent: 'continue', taskId: initialTask.id, objectId: taskTarget(initialTask)?.id, taskVersion: initialTask.version, focusRevision: work.focus?.revision ?? 0 });
   }, [isKibot, initialTask, work]);
   useEffect(() => { setPanelOpen(false); setPanelTab('files'); setProjectMenu(false); }, [project?.id]);
+  const acceptTitle = useCallback((thread: Pick<Thread, 'id' | 'title' | 'titleUpdatedAt' | 'updatedAt'>, sequence: number) => {
+    const previous = titleMetadata.current;
+    const previousVersion = previous?.titleUpdatedAt ?? previous?.updatedAt;
+    const nextVersion = thread.titleUpdatedAt ?? thread.updatedAt;
+    if (previous?.id === thread.id && previousVersion
+      && (previousVersion > nextVersion || previousVersion === nextVersion && sequence < appliedTitleSequence.current)) return false;
+    const changed = titleRef.current !== thread.title;
+    titleMetadata.current = thread; appliedTitleSequence.current = sequence; titleRef.current = thread.title; setTitle(thread.title);
+    return changed;
+  }, []);
   const loadThread = useCallback(async (id: string, initial = false) => {
     const sequence = ++loadSequence.current;
+    const titleSequence = ++titleReadSequence.current;
     if (initial) setLoading(true);
     try {
       const result = await api<{ thread: Thread; messages: Message[]; run: Run | null; replyLinks?: {messageId:string;runId:string}[] }>(`/api/threads/${enc(id)}${isKibot ? `?timeZone=${enc(timeline.timeZone)}` : ''}`);
       if (!mounted.current || sequence !== loadSequence.current || threadRef.current !== id) return false;
-      setMessages(result.messages); setReplyLinks(result.replyLinks || []); setRun(result.run); setTitle(result.thread.title); setError('');
+      setMessages(result.messages); setReplyLinks(result.replyLinks || []); setRun(result.run); acceptTitle(result.thread, titleSequence); setError('');
       return true;
     } catch (e) { if (mounted.current && sequence === loadSequence.current) setError(messageOf(e)); return false; }
     finally { if (mounted.current && sequence === loadSequence.current) setLoading(false); }
-  }, [isKibot, timeline.timeZone]);
+  }, [isKibot, timeline.timeZone, acceptTitle]);
   useEffect(() => {
     if (!isKibot || !threadId || supervisor?.revision === undefined || running || sending || sendingRef.current) return;
     const signature = `${threadId}:${supervisor.revision}`;
@@ -213,10 +227,33 @@ export function Workspace({ project: conversationProject, threadId, onThreadCrea
       setWorkSelection(undefined); setWorkRoute(null); setWork(null); setWorkError('');
       sendAttempt.current = null;
     }
-    newlyCreatedThread.current = null; setRun(null); setMessages([]); setReplyLinks([]); setTitle('新的对话');
+    newlyCreatedThread.current = null; titleMetadata.current = null; titleRef.current = '新的对话'; setRun(null); setMessages([]); setReplyLinks([]); setTitle('新的对话');
     if (threadId) void loadThread(threadId, true);
     else { ++loadSequence.current; setLoading(false); }
   }, [threadId, loadThread]);
+  useEffect(() => {
+    if (isKibot || !threadId || running) return;
+    const id = threadId, controller = new AbortController(), deadline = Date.now() + 90_000;
+    let pending = false, timer: number | undefined;
+    const current = () => !controller.signal.aborted && mounted.current && threadRef.current === id;
+    const refreshTitle = async () => {
+      if (!current() || pending || document.hidden) return;
+      clearTimeout(timer); pending = true;
+      const sequence = ++titleReadSequence.current;
+      try {
+        const result = await api<{ thread: Pick<Thread, 'id' | 'title' | 'titlePending' | 'titleUpdatedAt' | 'updatedAt'> }>(`/api/threads/${enc(id)}/title`, { signal: controller.signal });
+        if (!current() || result.thread.id !== id) return;
+        if (acceptTitle(result.thread, sequence)) onThreadsChanged();
+        if (result.thread.titlePending && Date.now() < deadline) timer = window.setTimeout(() => void refreshTitle(), 3000);
+      } catch {
+        // Title refresh must not turn a successful reply into a chat error.
+        if (current() && Date.now() < deadline) timer = window.setTimeout(() => void refreshTitle(), 3000);
+      } finally { pending = false; }
+    };
+    const wake = () => { if (document.hidden) clearTimeout(timer); else void refreshTitle(); };
+    void refreshTitle(); window.addEventListener('focus', wake); document.addEventListener('visibilitychange', wake);
+    return () => { controller.abort(); clearTimeout(timer); window.removeEventListener('focus', wake); document.removeEventListener('visibilitychange', wake); };
+  }, [threadId, isKibot, user.id, run?.id, running, onThreadsChanged, acceptTitle]);
   useEffect(() => {
     if (!run || run.status !== 'running') return;
     const runId = run.id; const currentThreadId = run.threadId;

@@ -190,11 +190,16 @@ export function createSupervisor({ store, workService, kibot, startTask, stopRun
     const { job, task } = ownedJob(userId, taskId);
     const context = graph.getTaskContext(userId, task.id, { maxMessages: 1 });
     const target = task.objects.find(object => object.role === 'target');
+    const conversationTitle = conversationId => {
+      const thread = conversationId && store.getThread(conversationId);
+      return thread?.userId === userId && !thread.isPrimary ? thread.title : undefined;
+    };
     if (!job) {
       const latest = context.runs[0], run = latest && store.getRun(latest.id);
       const focus = db.prepare('SELECT conversation_id FROM work_focus WHERE task_id=? ORDER BY updated_at DESC LIMIT 1').get(task.id);
+      const conversationId = focus?.conversation_id ?? context.messages[0]?.conversationId ?? null;
       return { id: task.id, goal: task.goal, status: task.status, version: task.version, queueStatus: 'unmanaged',
-        conversationId: focus?.conversation_id ?? context.messages[0]?.conversationId ?? null, originMessageId: null, messageIds: [],
+        conversationId, conversationTitle: conversationTitle(conversationId), originMessageId: null, messageIds: [],
         projectId: target?.projectId ?? null, projectName: target?.projectId ? store.getProject(target.projectId)?.name ?? null : null,
         latestRunId: run?.id ?? null, updatedAt: task.updatedAt, summary: '独立任务，可查看结果或明确要求继续',
         result: run && run.status !== 'running' ? clip(run.output, 3000) : null,
@@ -219,7 +224,7 @@ export function createSupervisor({ store, workService, kibot, startTask, stopRun
     messageIds.push(...db.prepare(`SELECT n.message_id FROM kibot_task_notifications n JOIN kibot_jobs j ON j.id=n.job_id
       WHERE j.task_id=? ORDER BY n.created_at DESC LIMIT 40`).all(task.id).map(item => item.message_id));
     return { id: task.id, goal: task.goal, status: approvals.length && queueStatus !== 'needs_reconciliation' ? 'waiting_approval' : task.status, version: task.version, queueStatus,
-      conversationId: job.conversation_id, originMessageId: job.origin_message_id, messageIds: [...new Set(messageIds)],
+      conversationId: job.conversation_id, conversationTitle: conversationTitle(job.conversation_id), originMessageId: job.origin_message_id, messageIds: [...new Set(messageIds)],
       projectId: target?.projectId ?? null, projectName: target?.projectId ? store.getProject(target.projectId)?.name ?? null : null,
       latestRunId: run?.id ?? null, updatedAt: [job.updated_at, task.updatedAt, run?.updatedAt].filter(Boolean).sort().at(-1),
       summary: clip(summary, 500), result: run && run.status !== 'running' ? clip(run.output, 3000) : null,

@@ -50,6 +50,8 @@ export function App() {
   const [openingTask, setOpeningTask] = useState<string | null>(null);
   const [initialTask, setInitialTask] = useState<WorkTask | undefined>();
   const [recentThreads, setRecentThreads] = useState<Thread[]>([]);
+  const recentThreadsRef = useRef(recentThreads); recentThreadsRef.current = recentThreads;
+  const [historyTitleRevision, setHistoryTitleRevision] = useState(0);
   const [recentError, setRecentError] = useState('');
   const taskRequest = useRef(0);
   const [historySearch,setHistorySearch] = useState('');
@@ -186,13 +188,33 @@ export function App() {
   useEffect(() => {
     if (!user?.id) { setWorkSnapshot(null); setRecentThreads([]); return; }
     const userId = user.id, epoch = authEpoch.current;
-    let cancelled = false; setTasksLoading(true); setTasksError(''); setRecentError('');
+    let cancelled = false, pending = false, timer: number | undefined;
+    const controller = new AbortController();
+    let titleDeadline = Date.now() + 90_000;
+    setTasksLoading(true); setTasksError(''); setRecentError('');
     const current = () => !cancelled && activeLocation.current.userId === userId && authEpoch.current === epoch;
     void api<WorkSnapshot>('/api/work').then(result => { if (current()) setWorkSnapshot(result); })
       .catch(e => { if (current()) setTasksError(messageOf(e)); }).finally(() => { if (current()) setTasksLoading(false); });
-    void api<{ threads: Thread[] }>('/api/history').then(result => { if (current()) setRecentThreads(result.threads); })
-      .catch(e => { if (current()) setRecentError(messageOf(e)); });
-    return () => { cancelled = true; };
+    const loadRecent = async () => {
+      if (!current() || pending || document.hidden) return;
+      clearTimeout(timer); pending = true;
+      try {
+        const result = await api<{ threads: Thread[] }>('/api/history', { signal: controller.signal });
+        if (!current()) return;
+        const changed = result.threads.some(thread => recentThreadsRef.current.find(previous => previous.id === thread.id)?.title !== thread.title);
+        recentThreadsRef.current = result.threads; setRecentThreads(result.threads); setRecentError('');
+        if (changed) setHistoryTitleRevision(value => value + 1);
+        const hasActiveRun = result.threads.some(thread => thread.hasActiveRun);
+        // A reply can outlive the title-job window after its conversation is
+        // closed. Keep observing active replies, then allow the title to settle.
+        if (hasActiveRun) titleDeadline = Date.now() + 90_000;
+        if (hasActiveRun || result.threads.some(thread => thread.titlePending) && Date.now() < titleDeadline) timer = window.setTimeout(() => void loadRecent(), 3000);
+      } catch (e) { if (current()) setRecentError(messageOf(e)); }
+      finally { pending = false; }
+    };
+    const wake = () => { if (document.hidden) clearTimeout(timer); else { titleDeadline = Date.now() + 90_000; void loadRecent(); } };
+    void loadRecent(); window.addEventListener('focus', wake); document.addEventListener('visibilitychange', wake);
+    return () => { cancelled = true; controller.abort(); clearTimeout(timer); window.removeEventListener('focus', wake); document.removeEventListener('visibilitychange', wake); };
   }, [user?.id, currentAuthEpoch, threadsRevision, supervisor.data?.revision]);
   useEffect(() => {
     if (!user?.id || navigationPanel !== 'history') return;
@@ -206,7 +228,7 @@ export function App() {
         .finally(() => { if (current()) setChatsLoading(false); });
     }, 200);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [user?.id, currentAuthEpoch, threadsRevision, historySearch, navigationPanel]);
+  }, [user?.id, currentAuthEpoch, threadsRevision, historySearch, navigationPanel, historyTitleRevision]);
   const onThreadsChanged = useCallback(() => setThreadsRevision(old => old + 1), []);
   const onThreadCreated = useCallback((thread: Thread) => {
     const current = activeLocation.current;
@@ -323,12 +345,14 @@ export function App() {
   const delegatedTasks = new Map(supervisor.data?.tasks.map(task => [task.id, task]) ?? []);
   const allTasks = [
     ...(workSnapshot?.tasks ?? []).map(task => ({ id: task.id, goal: task.goal, status: task.status, updatedAt: task.updatedAt,
+      title: delegatedTasks.get(task.id)?.conversationTitle || task.goal,
       projectId: task.objects.find(object => object.role === 'target')?.projectId, delegated: delegatedTasks.get(task.id) })),
     ...(supervisor.data?.tasks ?? []).filter(task => !workSnapshot?.tasks.some(item => item.id === task.id))
-      .map(task => ({ id: task.id, goal: task.goal, status: task.status, updatedAt: task.updatedAt, projectId: task.projectId, delegated: task })),
+      .map(task => ({ id: task.id, goal: task.goal, title: task.conversationTitle || task.goal, status: task.status, updatedAt: task.updatedAt, projectId: task.projectId, delegated: task })),
   ].sort((a, b) => taskPriority(a.delegated ?? { status: a.status, queueStatus: '' }) - taskPriority(b.delegated ?? { status: b.status, queueStatus: '' })
     || (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
   const recentTasks = allTasks.slice(0, 12);
+  const matchingTasks = allTasks.filter(task => `${task.title} ${task.goal}`.toLowerCase().includes(taskSearch.trim().toLowerCase()));
   const delegatedConversations = new Set(supervisor.data?.tasks.map(task => task.conversationId) ?? []);
   const recentConversations = recentThreads.filter(thread => thread.id !== primaryThread?.id && !delegatedConversations.has(thread.id)).slice(0, 8);
   if (initializing) return <div className="boot-screen"><Brand /><Loading label="正在打开工作空间…" /></div>;
@@ -352,9 +376,9 @@ export function App() {
           {tasksLoading && !workSnapshot && <p className="nav-empty">加载任务…</p>}
           {tasksError && <ErrorBox error={tasksError} onRetry={onThreadsChanged} />}
           {recentTasks.map(task => <button key={task.id} className={'nav-task-row' + (view === 'workspace' && initialTask?.id === task.id ? ' selected' : '')}
-            disabled={openingTask !== null || !primaryThread} onClick={() => void openTask(task)} title={task.goal}>
+            disabled={openingTask !== null || !primaryThread} onClick={() => void openTask(task)} title={task.title}>
             <Icon name={task.projectId ? 'code' : 'chat'} size={18} />
-            <span><strong>{task.goal}</strong><small className="nav-task-status">{openingTask === task.id ? '正在打开…' : task.delegated ? taskStatus(task.delegated) : taskLabels[task.status] || task.status}{workSnapshot && workSnapshot.mode !== 'enforce' ? ' · 仅查看' : ''}</small></span>
+            <span><strong>{task.title}</strong><small className="nav-task-status">{openingTask === task.id ? '正在打开…' : task.delegated ? taskStatus(task.delegated) : taskLabels[task.status] || task.status}{workSnapshot && workSnapshot.mode !== 'enforce' ? ' · 仅查看' : ''}</small></span>
           </button>)}
           {recentTasks.length > 0 && recentConversations.length > 0 && <div className="nav-legacy-label">独立对话</div>}
           {recentConversations.map(thread => <button key={thread.id} title={thread.title} className={'nav-task-row' + (view === 'workspace' && !initialTask && thread.id === threadId ? ' selected' : '')} onClick={() => void selectThread(thread)}>
@@ -394,8 +418,8 @@ export function App() {
       <div className="nav-search-field"><Icon name="search" /><input autoFocus aria-label="搜索任务" placeholder="搜索任务目标" value={taskSearch} onChange={event => setTaskSearch(event.target.value)} /></div>
       <div className="nav-dialog-body supervisor-all-list">
         {tasksError && <ErrorBox error={tasksError} onRetry={onThreadsChanged} />}
-        {allTasks.filter(task => task.goal.toLowerCase().includes(taskSearch.trim().toLowerCase())).map(task => <button className="nav-result-row" key={task.id} disabled={openingTask !== null} onClick={() => void openTask(task)}><Icon name={task.projectId ? 'code' : 'chat'} /><span><strong>{task.goal}</strong><small>{task.delegated ? taskStatus(task.delegated) : taskLabels[task.status] || task.status}</small></span><Icon name="arrow" /></button>)}
-        {!allTasks.some(task => task.goal.toLowerCase().includes(taskSearch.trim().toLowerCase())) && <p className="nav-empty">{taskSearch ? '没有匹配的任务。' : '在 kibot 中交代你想完成的工作，即可开始。'}</p>}
+        {matchingTasks.map(task => <button className="nav-result-row" key={task.id} disabled={openingTask !== null} onClick={() => void openTask(task)}><Icon name={task.projectId ? 'code' : 'chat'} /><span><strong>{task.title}</strong><small>{task.delegated ? taskStatus(task.delegated) : taskLabels[task.status] || task.status}</small></span><Icon name="arrow" /></button>)}
+        {!matchingTasks.length && <p className="nav-empty">{taskSearch ? '没有匹配的任务。' : '在 kibot 中交代你想完成的工作，即可开始。'}</p>}
       </div>
     </Modal>}
     {navigationPanel === 'new' && <Modal title="开始新的工作" description="告诉 kibot 目标和要操作的项目，它会建立独立任务并跟进结果。" onClose={() => setNavigationPanel(null)}>

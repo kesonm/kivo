@@ -65,6 +65,53 @@ test('standard and Ultra chats leave output limits to the provider and account u
   assert.deepEqual(f.store.getUsage({ userId: f.users[0].id }).usage.map(row => row.outputTokens), [8192, 8192]);
 });
 
+test('disabling automatic titles recovers unfinished jobs without replaying provider calls', async t => {
+  const store = createStore(':memory:', { credentialsKey: randomBytes(32) });
+  const user = store.createUser({ username: 'title_recovery', displayName: 'title', passwordHash: 'unused' });
+  store.setUserApiKey(user.id, 'sk-fake-title-recovery-0123456789');
+  const thread = store.createThread(null, user.id), run = store.createRun(thread.id, user.id);
+  store.appendMessage(thread.id, 'user', '优化导航'); store.appendMessage(thread.id, 'assistant', '建议精简入口');
+  store.updateRun(run.id, { status: 'completed' });
+  store.enqueueTitleJob({ runId: run.id, model: 'test-model' });
+  assert.equal(store.getThread(thread.id).titlePending, true);
+  const runtime = createRuntime({ store, config: { autoThreadTitles: false, model: 'test-model' },
+    fetchImpl: async () => { throw new Error('must not replay a title request'); } });
+  t.after(async () => { await runtime.close(); store.close(); });
+  assert.equal(store.getTitleJob(run.id).status, 'skipped');
+  assert.equal(store.getThread(thread.id).titlePending, undefined);
+});
+
+test('completed replies publish done before asynchronous title summaries and account title usage separately', { timeout: 10000 }, async t => {
+  let resolveTitle, titleRequest;
+  const f = setup(t, { config: { autoThreadTitles: true, maxOutputTokens: undefined }, fetchImpl: async (url, options) => {
+    const payload = JSON.parse(options.body);
+    if (payload.stream === false) {
+      titleRequest = { url, payload };
+      return new Promise(resolve => { resolveTitle = resolve; });
+    }
+    return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(encode(terminal('我们可以先改进导航和输入区域。'))); controller.close();
+    } }), { headers: { 'content-type': 'text/event-stream' } });
+  } });
+  const input = f.create(f.users[0], '帮我优化网页界面'), events = [];
+  f.store.updateRun(input.run.id, { requestMessageId: f.store.getMessages(input.thread.id)[0].id });
+  f.runtime.subscribe(input.run.id, event => events.push(event));
+  await f.runtime.start(input);
+  await until(() => events.some(event => event.event === 'done') && resolveTitle);
+  assert.equal(f.store.getRun(input.run.id).status, 'completed');
+  assert.equal(f.store.getThread(input.thread.id).titlePending, true);
+  assert.equal(Object.hasOwn(titleRequest.payload, 'max_output_tokens'), false);
+  assert.equal(titleRequest.url, 'https://api.openai.com/v1/responses');
+  resolveTitle(Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant',
+    content: [{ type: 'output_text', text: '网页导航与输入区域优化' }] }],
+    usage: { input_tokens: 30, output_tokens: 10, total_tokens: 40 } }));
+  await until(() => !f.store.getThread(input.thread.id).titlePending);
+  assert.equal(f.store.getThread(input.thread.id).title, '网页导航与输入区域优化');
+  const records = f.store.getUsage({ userId: input.user.id }).usage;
+  assert.equal(records.find(row => row.source === 'thread_title').totalTokens, 40);
+  assert.equal(f.store.getMessages(input.thread.id).filter(message => message.role === 'assistant').length, 1);
+});
+
 test('plain chat cancellation settles unknown usage once and retains streamed text without Docker', { timeout: 10000 }, async t => {
   const f = setup(t), input = f.create(), events = [];
   f.runtime.subscribe(input.run.id, event => events.push(event));

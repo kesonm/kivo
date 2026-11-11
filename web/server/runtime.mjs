@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createGateway, GatewayError } from './gateway.mjs';
 import { CHAT_MAX_MESSAGES, CHAT_MAX_BYTES, prepareChatRequest, streamChat } from './chat.mjs';
 import { assertEnvironmentCompatible } from './engine-adapter.mjs';
+import { createThreadTitles } from './thread-titles.mjs';
 
 const execFileAsync = promisify(execFile);
 const OUTPUT_LIMIT = 2 * 1024 * 1024;
@@ -92,6 +93,8 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
   const subscribers = new Map();
   let closing = false;
   let primaryAssistantFactory = null;
+  if (!config.autoThreadTitles) store.recoverTitleJobs?.();
+  const threadTitles = config.autoThreadTitles ? createThreadTitles({ store, config, fetchImpl }) : null;
 
   function assertWorkCurrent(state) {
     if (state.workContext) store.work.assertRunCurrent(state.user.id, state.run.id, state.workContext.binding);
@@ -255,6 +258,10 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
           confirmedStopped:state.kind !== 'local' || state.localStopConfirmed === true });
         // finish has drained the provider and confirmed container cleanup. Local
         // stop is handled separately; an unanswered device must retain its lease.
+      }
+      if (!closing && acceptResult && status === 'completed' && messageIds.length && threadTitles) {
+        try { threadTitles.enqueue({ runId: state.run.id, model: state.model || config.model }); }
+        catch { console.error(JSON.stringify({ event: 'thread_title_enqueue_failed', runId: state.run.id })); }
       }
       emit(state.run.id, 'done', { status, message: error });
       active.delete(state.run.id);
@@ -586,7 +593,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
         if (!gatewayReady) gatewayReady = gateway.start();
         const address = await gatewayReady;
         checkAccount();
-        const state = { kind: 'chat', isPrimary, applicationTools, onToolCall: primary?.onToolCall, workContext, questionContext, chatMode, run, thread, project: null, user, token: '', output: '', logs: [], artifacts: [], citations: [], pendingImageActivity: [], pending: new Map(), finishing: null, chatController: new AbortController() };
+        const state = { kind: 'chat', model, isPrimary, applicationTools, onToolCall: primary?.onToolCall, workContext, questionContext, chatMode, run, thread, project: null, user, token: '', output: '', logs: [], artifacts: [], citations: [], pendingImageActivity: [], pending: new Map(), finishing: null, chatController: new AbortController() };
         state.token = gateway.authorizeRun({ id: run.id, userId: user.id,
           chatModel: model, reasoningEffort, chatMode, chatTools: hostedTools, applicationTools,
           chatFiles: files.filter(file => file.kind === 'table').map(file => ({ ...file, name: file.analysisName ?? file.name })) });
@@ -708,6 +715,7 @@ export function createRuntime({ store, config, local = null, spawnImpl = spawn, 
       const states = [...active.values()];
       await Promise.allSettled([...states.map(s => finish(s, 'interrupted', '服务重启，任务已停止。', 'restart')), ...[...startingWaiters.values()].map(waiter => waiter.promise)]);
       await Promise.allSettled(states.map(s => s.execution).filter(Boolean));
+      await threadTitles?.close();
       await gateway.close();
       local?.close();
     },

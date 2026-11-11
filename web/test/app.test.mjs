@@ -351,6 +351,10 @@ test('ordinary chats create, run and reload without any project filesystem opera
   assert.deepEqual((await alice.request('GET','/api/threads')).data.threads.map(t=>t.id),[thread.id]);
   assert.deepEqual((await bob.request('GET','/api/threads')).data.threads,[]);
   assert.equal((await bob.request('GET',`/api/threads/${thread.id}`)).status,404);
+  assert.equal((await bob.request('GET',`/api/threads/${thread.id}/title`)).status,404);
+  const titleOnly=await alice.request('GET',`/api/threads/${thread.id}/title`);
+  assert.equal(titleOnly.status,200);assert.equal(titleOnly.data.thread.title,thread.title);
+  assert.deepEqual(Object.keys(titleOnly.data.thread).sort(),['id','title','updatedAt']);
   assert.equal((await bob.request('POST',`/api/threads/${thread.id}/turns`,{text:'Steal'})).status,404);
   assert.equal((await alice.request('GET','/api/projects')).data.projects.length,0);
   const noKey=await alice.request('POST',`/api/threads/${thread.id}/turns`,{text:'Hello'});
@@ -358,6 +362,7 @@ test('ordinary chats create, run and reload without any project filesystem opera
   await alice.request('PUT','/api/account/api-key',{apiKey:keyA});
   const accepted=await alice.request('POST',`/api/threads/${thread.id}/turns`,{text:'Hello ordinary chat'});
   assert.equal(accepted.status,202);assert.equal(accepted.data.run.projectId,null);
+  assert.equal((await alice.request('GET','/api/history')).data.threads.find(t=>t.id===thread.id).hasActiveRun,true);
   assert.equal(startCalls.length,1);assert.equal(startCalls[0].project,null);assert.equal(startCalls[0].thread.id,thread.id);
   assert.equal((await bob.request('GET',`/api/runs/${accepted.data.run.id}/events`)).status,404);
   assert.equal((await bob.request('POST',`/api/runs/${accepted.data.run.id}/interrupt`,{})).status,404);
@@ -366,6 +371,7 @@ test('ordinary chats create, run and reload without any project filesystem opera
   store.appendMessage(thread.id,'assistant','Hello back');store.updateRun(accepted.data.run.id,{status:'completed',output:'Hello back'});
   const history=await alice.request('GET',`/api/threads/${thread.id}`);
   assert.equal(history.data.thread.title,'Hello ordinary chat');assert.deepEqual(history.data.messages.map(m=>m.content),['Hello ordinary chat','Hello back']);assert.equal(history.data.run.status,'completed');
+  assert.equal((await alice.request('GET','/api/history')).data.threads.find(t=>t.id===thread.id).hasActiveRun,undefined);
   const adminList=await admin.request('GET',`/api/admin/threads?userId=${user.id}&query=ordinary`);
   assert.equal(adminList.data.total,1);assert.equal(adminList.data.threads[0].project,null);
   const detail=await admin.request('GET',`/api/admin/threads/${thread.id}`);assert.equal(detail.data.project,null);assert.equal(detail.data.messagesTotal,2);assert.equal(detail.data.runs[0].projectId,null);

@@ -66,6 +66,7 @@ export function loadConfig(env=process.env){
     model:env.CODEX_MODEL??'gpt-6.1-sol',credentialsKeyFile:env.CREDENTIALS_KEY_FILE??'/run/secrets/credentials-key',
     openaiBaseUrl:'https://api.openai.com/v1',gatewayPort:int('GATEWAY_PORT',3001,1,65535),gatewayHost:env.GATEWAY_HOST??'0.0.0.0',
     maxOutputTokens,maxConcurrentRuns:int('MAX_CONCURRENT_RUNS',2,1,16),
+    autoThreadTitles:env.AUTO_THREAD_TITLES!=='false',
     runTimeoutMs:int('RUN_TIMEOUT_MS',600000,1000,3600000),
     workRoutingMode,workModelBudgets,workContextBytes:int('WORK_CONTEXT_BYTES',393216,8192,500000),
     publicOrigin:env.PUBLIC_ORIGIN??'',cookieSecure:env.COOKIE_SECURE!=='false',trustProxy:trustedProxyIps.length?trustedProxyIps:false,
@@ -411,7 +412,14 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     checkedQuery(req,[]);res.json(primaryMemory.snapshot(req.user.id));
   });
   app.delete('/api/kibot/memory/:id',auth,(req,res)=>res.json(primaryMemory.forget(req.user.id,req.params.id)));
-  app.get('/api/history',auth,(req,res)=>{checkedQuery(req,['q']);const q=String(req.query.q??'').slice(0,100);res.json({threads:store.db.prepare('SELECT id,project_id projectId,title,created_at createdAt,updated_at updatedAt FROM threads WHERE user_id=? AND id NOT IN (SELECT thread_id FROM kibot_threads) AND instr(lower(title),lower(?))>0 ORDER BY updated_at DESC LIMIT 100').all(req.user.id,q)});});
+  app.get('/api/history',auth,(req,res)=>{
+    checkedQuery(req,['q']);const q=String(req.query.q??'').slice(0,100);
+    const rows=store.db.prepare('SELECT id,project_id projectId,title,created_at createdAt,updated_at updatedAt FROM threads WHERE user_id=? AND id NOT IN (SELECT thread_id FROM kibot_threads) AND instr(lower(title),lower(?))>0 ORDER BY updated_at DESC LIMIT 100').all(req.user.id,q);
+    res.json({threads:rows.map(row=>{
+      const thread=store.getThread(row.id),active=store.db.prepare("SELECT 1 FROM runs WHERE thread_id=? AND status='running' LIMIT 1").get(row.id);
+      return {...row,...(active?{hasActiveRun:true}:{}),...(thread?.titlePending?{titlePending:true}:{}),...(thread?.titleUpdatedAt?{titleUpdatedAt:thread.titleUpdatedAt}:{})};
+    })});
+  });
   app.get('/api/threads',auth,(req,res)=>{checkedQuery(req,[]);res.json({threads:store.listStandaloneThreads(req.user.id)});});
   app.get('/api/work',auth,(req,res)=>res.json(workService.state(req.user.id)));
   app.get('/api/work/objects',auth,(req,res)=>res.json({objects:workService.graph.listObjects(req.user.id,{query:req.query.q??'',limit:200})}));
@@ -480,6 +488,11 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     rate(req,'create-chat',30,60_000);
     if(Object.keys(req.body).some(key=>key!=='title'))throw new AppError('普通对话仅接受标题');
     res.status(201).json({thread:store.createThread(null,req.user.id,requiredText(req.body.title??'新对话','对话标题',100))});
+  });
+  app.get('/api/threads/:id/title',auth,(req,res)=>{
+    checkedQuery(req,[]);rate(req,'thread-title',120,60_000);
+    const {id,title,titlePending,titleUpdatedAt,updatedAt}=ownedThread(req);
+    res.json({thread:{id,title,...(titlePending?{titlePending:true}:{}),...(titleUpdatedAt?{titleUpdatedAt}:{}),updatedAt}});
   });
   app.get('/api/threads/:id',auth,(req,res)=>{
     const thread=ownedThread(req);

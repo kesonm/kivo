@@ -56,8 +56,9 @@ export function taskPriority(task: Pick<SupervisorTask, 'status' | 'queueStatus'
   return 3;
 }
 export function TaskCard({ task, onOpen }: { task: SupervisorTask; onOpen: (task: SupervisorTask, trigger: HTMLButtonElement) => void }) {
-  return <button type="button" className="supervisor-task-card" onClick={event => onOpen(task, event.currentTarget)} aria-label={`查看任务：${task.goal}`}>
-    <span className="supervisor-card-heading"><Icon name={task.projectId ? 'code' : 'chat'} size={16} /><strong>{task.goal}</strong><span className="supervisor-status">{taskStatus(task)}</span></span>
+  const title = task.conversationTitle || task.goal;
+  return <button type="button" className="supervisor-task-card" onClick={event => onOpen(task, event.currentTarget)} aria-label={`查看任务：${title}`}>
+    <span className="supervisor-card-heading"><Icon name={task.projectId ? 'code' : 'chat'} size={16} /><strong>{title}</strong><span className="supervisor-status">{taskStatus(task)}</span></span>
     <span className="supervisor-card-project">{task.projectName || '独立文字任务'}</span>
     {task.summary && <span className="supervisor-card-summary">{task.summary}</span>}
     {task.pendingFollowUp && <span className="supervisor-card-project">已收到补充要求，等待当前执行结束</span>}
@@ -120,10 +121,11 @@ export function TaskPanel({ task, revision, overlay, returnFocus, onClose, onRef
   return <>
     {overlay && <button className="kibot-history-backdrop" tabIndex={-1} aria-label="关闭任务详情" onClick={onClose} />}
     <aside ref={panel} className={'kibot-history-panel supervisor-panel' + (overlay ? ' kibot-history-overlay' : '')} role="dialog" aria-modal={overlay || undefined} aria-labelledby="supervisor-panel-title" tabIndex={-1}>
-      <header className="kibot-history-header"><div><p className="supervisor-eyebrow">kibot 安排的任务</p><h2 id="supervisor-panel-title">{current.goal}</h2><p className="kibot-history-subtitle">{current.projectName || '独立文字任务'} · {taskStatus(current)}</p></div><button ref={close} className="icon-button" aria-label="关闭任务详情" onClick={onClose}><Icon name="close" /></button></header>
+      <header className="kibot-history-header"><div><p className="supervisor-eyebrow">kibot 安排的任务</p><h2 id="supervisor-panel-title">{current.conversationTitle || current.goal}</h2><p className="kibot-history-subtitle">{current.projectName || '独立文字任务'} · {taskStatus(current)}</p></div><button ref={close} className="icon-button" aria-label="关闭任务详情" onClick={onClose}><Icon name="close" /></button></header>
       <div className="kibot-history-scroll supervisor-detail-scroll">
         {error && <ErrorBox error={error} onRetry={() => setRetry(value => value + 1)} />}
         {!detail && !error && <Loading label="读取任务进展…" />}
+        <section className="supervisor-detail-section"><h3>任务目标</h3><p>{current.goal}</p></section>
         {current.summary && <section className="supervisor-detail-section"><h3>最新进展</h3><Markdown content={current.summary} /></section>}
         {current.result && <section className="supervisor-detail-section"><h3>结果摘录</h3><Markdown content={current.result} /></section>}
         {artifacts.length > 0 && <section className="supervisor-detail-section"><h3>工作产物</h3>{artifacts.map(artifact => <div className="supervisor-artifact" key={artifact.id}><Icon name="file" size={16} /><span>{artifact.name || artifact.title || '工作结果'}{artifact.version != null && <small>v{artifact.version}{artifact.status === 'stale' ? ' · 已有后续变化' : ''}</small>}</span></div>)}<p className="supervisor-detail-hint">打开任务会话，查看完整产物与验收记录。</p></section>}

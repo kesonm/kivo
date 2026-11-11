@@ -203,6 +203,16 @@ export function createStore(dbPath,{credentialsKey}={}) {
     );
     CREATE INDEX IF NOT EXISTS request_usage_user ON request_usage(user_id,created_at);
     CREATE INDEX IF NOT EXISTS request_usage_run ON request_usage(run_id);
+    CREATE TABLE IF NOT EXISTS thread_title_jobs (
+      run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+      thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id), model TEXT NOT NULL,
+      message_rowid INTEGER NOT NULL, previous_title TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','skipped','unknown')),
+      usage_id TEXT REFERENCES request_usage(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS thread_title_jobs_thread ON thread_title_jobs(thread_id,status);
     CREATE TABLE IF NOT EXISTS audit (
       id TEXT PRIMARY KEY, actor_id TEXT REFERENCES users(id), action TEXT NOT NULL,
       target TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL
@@ -243,7 +253,25 @@ export function createStore(dbPath,{credentialsKey}={}) {
       apiKeyConfigured:key.configured,keyLast4:key.last4,createdAt:r.created_at};
   };
   const projectView = (r) => { if(!r)return null;const local=db.prepare('SELECT device_id,path FROM local_projects WHERE project_id=?').get(r.id);return {id:r.id,userId:r.user_id,name:r.name,createdAt:r.created_at,updatedAt:r.updated_at,...(local?{location:'local',deviceId:local.device_id,localPath:local.path}:{location:'cloud'})}; };
+  const titleJobCurrent = row => {
+    if (!row) return false;
+    const thread = db.prepare('SELECT * FROM threads WHERE id=? AND user_id=?').get(row.thread_id,row.user_id);
+    const user = db.prepare('SELECT disabled FROM users WHERE id=?').get(row.user_id);
+    const run = db.prepare('SELECT * FROM runs WHERE id=? AND user_id=? AND thread_id=?').get(row.run_id,row.user_id,row.thread_id);
+    return !!thread && !!user && !user.disabled && thread.title===row.previous_title && run?.status==='completed'
+      && !db.prepare('SELECT 1 FROM kibot_threads WHERE thread_id=?').get(row.thread_id)
+      && db.prepare('SELECT id FROM runs WHERE thread_id=? ORDER BY rowid DESC LIMIT 1').get(row.thread_id)?.id===row.run_id
+      && db.prepare('SELECT coalesce(max(rowid),0) n FROM messages WHERE thread_id=?').get(row.thread_id).n===row.message_rowid;
+  };
+  const titleJobView = row => row ? ({runId:row.run_id,threadId:row.thread_id,userId:row.user_id,model:row.model,
+    previousTitle:row.previous_title,status:row.status,usageId:row.usage_id,createdAt:row.created_at,updatedAt:row.updated_at}) : null;
+  const titleVersion = threadId => {
+    const row=db.prepare("SELECT updated_at FROM thread_title_jobs WHERE thread_id=? AND status='completed' ORDER BY rowid DESC LIMIT 1").get(threadId);
+    return row?{titleUpdatedAt:row.updated_at}:{};
+  };
   const threadView = (r) => r ? ({id:r.id,projectId:r.project_id,userId:r.user_id,title:r.title,codexThreadId:r.codex_thread_id,createdAt:r.created_at,updatedAt:r.updated_at,
+    ...titleVersion(r.id),
+    ...(db.prepare("SELECT * FROM thread_title_jobs WHERE thread_id=? AND status IN ('queued','running')").all(r.id).some(titleJobCurrent)?{titlePending:true}:{}),
     ...(db.prepare('SELECT 1 FROM kibot_threads WHERE thread_id=? AND user_id=?').get(r.id,r.user_id)?{isPrimary:true}:{})}) : null;
   const runRows = `SELECT r.*,d.mode,d.resumed_from_run_id,d.request_message_id,d.verification_command,
     d.verification_status,d.verification_exit_code,d.interrupt_reason FROM runs r LEFT JOIN run_details d ON d.run_id=r.id`;
@@ -415,6 +443,66 @@ export function createStore(dbPath,{credentialsKey}={}) {
         const usageId=id();
         db.prepare('INSERT INTO request_usage(id,user_id,run_id,credential_id,key_last4,model,status,created_at) VALUES(?,?,?,?,?,?,?,?)').run(usageId,userId,runId,metadata.credentialId,metadata.last4,model,'pending',now());
         return usageId;
+      });
+    },
+    enqueueTitleJob({runId,model}) {
+      if(typeof model!=='string'||!model||model.length>200)throw new AppError('模型标识无效');
+      return tx(()=>{
+        if(db.prepare('SELECT 1 FROM thread_title_jobs WHERE run_id=?').get(runId))return null;
+        const run=api.getRun(runId),thread=run&&api.getThread(run.threadId);
+        if(!run||!thread)return null;
+        const row={run_id:runId,thread_id:thread.id,user_id:run.userId,model,
+          message_rowid:db.prepare('SELECT coalesce(max(rowid),0) n FROM messages WHERE thread_id=?').get(thread.id).n,
+          previous_title:thread.title};
+        if(!titleJobCurrent(row))return null;
+        const at=now();
+        db.prepare(`INSERT INTO thread_title_jobs(run_id,thread_id,user_id,model,message_rowid,previous_title,status,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,'queued',?,?)`).run(runId,thread.id,run.userId,model,row.message_rowid,thread.title,at,at);
+        return titleJobView(db.prepare('SELECT * FROM thread_title_jobs WHERE run_id=?').get(runId));
+      });
+    },
+    getTitleJob: runId=>titleJobView(db.prepare('SELECT * FROM thread_title_jobs WHERE run_id=?').get(runId)),
+    getTitleContext(runId) {
+      const row=db.prepare('SELECT * FROM thread_title_jobs WHERE run_id=?').get(runId);
+      if(!row||!['queued','running'].includes(row.status)||!titleJobCurrent(row))return null;
+      const messages=db.prepare(`SELECT role,substr(content,1,2000) content FROM messages
+        WHERE thread_id=? AND rowid<=? AND role IN ('user','assistant') ORDER BY rowid DESC LIMIT 12`).all(row.thread_id,row.message_rowid).reverse();
+      return {...titleJobView(row),messages};
+    },
+    beginTitleUsage(runId,{keyLast4}={}) {
+      return tx(()=>{
+        const row=db.prepare('SELECT * FROM thread_title_jobs WHERE run_id=?').get(runId);
+        if(row?.status!=='queued'||!titleJobCurrent(row))return null;
+        const metadata=keyMetadata(row.user_id);
+        if(!metadata.configured||keyLast4!==metadata.last4)return null;
+        const usageId=id(),at=now();
+        db.prepare(`INSERT INTO request_usage(id,user_id,run_id,credential_id,key_last4,model,status,source,created_at)
+          VALUES(?,?,?,?,?,?,'pending','thread_title',?)`).run(usageId,row.user_id,runId,metadata.credentialId,metadata.last4,row.model,at);
+        db.prepare("UPDATE thread_title_jobs SET status='running',usage_id=?,updated_at=? WHERE run_id=?").run(usageId,at,runId);
+        return usageId;
+      });
+    },
+    settleTitleJob(runId,{status='failed',title}={}) {
+      if(!['completed','failed','skipped','unknown'].includes(status))throw new AppError('标题任务状态无效');
+      return tx(()=>{
+        const row=db.prepare('SELECT * FROM thread_title_jobs WHERE run_id=?').get(runId);
+        if(!row||!['queued','running'].includes(row.status))return false;
+        let applied=false;
+        if(status==='completed'){
+          if(typeof title!=='string'||!title.trim()||[...title].length>60||/[\x00-\x1f\x7f-\x9f\u2028\u2029]/u.test(title))status='failed';
+          else if(!titleJobCurrent(row))status='skipped';
+          else {db.prepare('UPDATE threads SET title=? WHERE id=? AND user_id=? AND title=?').run(title.trim(),row.thread_id,row.user_id,row.previous_title);applied=true;}
+        }
+        db.prepare('UPDATE thread_title_jobs SET status=?,updated_at=? WHERE run_id=?').run(status,now(),runId);
+        return applied;
+      });
+    },
+    recoverTitleJobs() {
+      return tx(()=>{
+        const at=now();
+        db.prepare(`UPDATE request_usage SET status='unknown',settled_at=? WHERE status='pending'
+          AND id IN (SELECT usage_id FROM thread_title_jobs WHERE status='running')`).run(at);
+        db.prepare("UPDATE thread_title_jobs SET status=CASE status WHEN 'running' THEN 'unknown' ELSE 'skipped' END,updated_at=? WHERE status IN ('queued','running')").run(at);
       });
     },
     settleUsage(usageId,value={}) {

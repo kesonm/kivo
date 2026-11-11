@@ -3,7 +3,7 @@ export interface User {
   disabled: boolean; usedTokens: number; apiKeyConfigured: boolean; keyLast4?: string | null; createdAt: string;
 }
 export interface Project { id: string; name: string; createdAt: string; updatedAt: string; location?: 'local' | 'cloud'; deviceId?: string; localPath?: string }
-export interface Thread { id: string; projectId: string | null; title: string; createdAt: string; updatedAt: string }
+export interface Thread { id: string; projectId: string | null; title: string; titlePending?: boolean; titleUpdatedAt?: string; hasActiveRun?: boolean; createdAt: string; updatedAt: string }
 export type ChatTool = 'auto' | 'image' | 'search' | 'analyze';
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export interface ChatModelOption {
@@ -51,7 +51,7 @@ export interface RunEvent {
 }
 export interface Session { user: User | null; csrfToken: string; providerConfigured: boolean; model?: string; defaultChatModel?: string; chatModels?: ChatModelOption[] }
 export interface ApiKeyStatus { configured: boolean; last4: string | null; updatedAt: string | null }
-export interface Usage { id: string; model: string; inputTokens: number | null; outputTokens: number | null; totalTokens: number | null; status: string; createdAt: string; userId?: string; username?: string; displayName?: string; threadId?: string; runId?: string; keyLast4?: string | null }
+export interface Usage { id: string; model: string; inputTokens: number | null; outputTokens: number | null; totalTokens: number | null; status: string; source?: string; createdAt: string; userId?: string; username?: string; displayName?: string; threadId?: string; runId?: string; keyLast4?: string | null }
 export interface UsagePage { usage: Usage[]; total: number; limit: number; offset: number; totals?: { inputTokens: number; outputTokens: number; totalTokens: number; unknownRequests: number; totalRequests: number } }
 export interface FileEntry { path: string; size: number }
 export interface Diff { diff: string; files: { path: string; status: string }[]; truncated: boolean }
@@ -106,6 +106,7 @@ export interface WorkSnapshot {
 
 export interface SupervisorTask {
   id: string; goal: string; status: string; queueStatus: string;
+  conversationTitle?: string;
   conversationId: string; originMessageId: string; projectId?: string | null; projectName?: string | null;
   messageIds?: string[];
   latestRunId?: string | null; updatedAt: string; summary?: string; version?: number;
