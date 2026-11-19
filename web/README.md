@@ -106,7 +106,9 @@ Ubuntu 隔离环境已通过 TypeScript/Vite 构建、197 项测试及 15 项浏
 
 只有 OpenAI 返回的可靠 usage 才计入实际 token 总量；中断后未返回 usage 的请求标为未知，不伪装成实际零消耗，也不估算扣除平台额度。历史旧版估算记录仍与实际用量区分。
 
-**普通推理 API Key 没有已公开文档支持的账户余额查询接口。** 官方组织 Usage/Costs 接口需要单独的 OpenAI Admin API Key，网站不索取这一额外管理凭据。账户页提供官方入口：
+左下角个人设置显示本站累计模型费用的美元估算，账户页显示暂未计价和待结算的请求数。估算使用 [OpenAI 公开标准价格](https://developers.openai.com/api/docs/pricing) 和 Responses 返回的用量，包括缓存读写和已定义的长上下文价格。历史用量缺少缓存明细，升级时按未缓存标准价格补算。已保存的估算不会随价格表更新而重算。语音、生图和工具单列费用以官方账单为准。
+
+**普通推理 API Key 无法查询官方账单或余额。** [组织 Costs API](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage/methods/costs) 支持按 API Key 筛选费用，需要组织的 OpenAI Admin API Key。kivo 仍只使用用户原有的个人 Key。账户页提供官方入口：
 
 - [OpenAI 账户余额与账单](https://platform.openai.com/settings/organization/billing/overview)
 - [OpenAI 全账户用量](https://platform.openai.com/usage)

@@ -32,6 +32,32 @@ test('unknown and failed requests remain null and never enter actual usage total
   assert.ok(result.usage.every(r=>r.totalTokens===null&&r.inputTokens===null&&r.outputTokens===null));assert.equal(store.getUser(user.id).usedTokens,0);
 });
 
+test('upgrading recorded usage estimates historical rows once and keeps missing rates unpriced', async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'kivo-usage-estimate-'));
+  const filename = path.join(directory, 'workspace.sqlite');
+  const credentialsKey = randomBytes(32);
+  let store = createStore(filename, { credentialsKey });
+  t.after(async () => { store.close(); await rm(directory, { recursive: true, force: true }); });
+  const user = store.createUser({ username: 'alice', displayName: 'Alice', passwordHash: 'test' });
+  store.setUserApiKey(user.id, keyA);
+  const thread = store.createThread(null, user.id);
+  const run = store.createRun(thread.id, user.id);
+  for (const model of ['gpt-6.1-sol', 'unlisted-model']) {
+    const request = store.beginUsage(user.id, run.id, { model });
+    store.settleUsage(request, { status: 'completed', inputTokens: 1000, outputTokens: 100, totalTokens: 1100 });
+  }
+  store.db.exec('ALTER TABLE request_usage DROP COLUMN estimated_cost_nanos');
+  store.close();
+
+  for (let pass = 0; pass < 2; pass++) {
+    store = createStore(filename, { credentialsKey });
+    assert.deepEqual(store.getUsageEstimate(user.id), { usd: 0.003, unpricedRequests: 1, pendingRequests: 0 });
+    assert.equal(store.getUsage({ userId: user.id }).totals.totalTokens, 2200);
+    assert.equal(store.db.prepare('PRAGMA foreign_key_check').all().length, 0);
+    if (pass === 0) store.close();
+  }
+});
+
 test('key changes are rejected during active runs, with no cross-user reads',t=>{
   const {store,user,thread,admin}=setup(t),run=store.createRun(thread.id,user.id);
   assert.throws(()=>store.setUserApiKey(user.id,keyB),e=>e.status===409);assert.throws(()=>store.deleteUserApiKey(user.id),e=>e.status===409);

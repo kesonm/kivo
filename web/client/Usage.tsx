@@ -2,6 +2,17 @@ import { dateTime, number } from './api';
 import { Empty, StatusBadge } from './ui';
 import type { Usage } from './types';
 
+const usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+const smallUsd = new Intl.NumberFormat('en-US', {
+  style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4,
+});
+
+export function formatEstimatedSpend(amount: number | null | undefined) {
+  if (amount == null) return '—';
+  if (amount > 0 && amount < 0.0001) return '<$0.0001';
+  return amount > 0 && amount < 0.01 ? smallUsd.format(amount) : usd.format(amount);
+}
+
 export function Pagination({ total, offset, limit, loading = false, onChange }: { total: number; offset: number; limit: number; loading?: boolean; onChange: (offset: number) => void }) {
   if (total <= limit) return null;
   return <div className="pagination"><span>第 {number(offset + 1)}–{number(Math.min(offset + limit, total))} 条，共 {number(total)} 条</span><div className="row"><button className="button small-button secondary" disabled={loading || offset === 0} onClick={() => onChange(Math.max(0, offset - limit))}>上一页</button><button className="button small-button secondary" disabled={loading || offset + limit >= total} onClick={() => onChange(offset + limit)}>下一页</button></div></div>;

@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createCredentialCipher, validateApiKey } from './credentials.mjs';
 import { defaultChatModelCatalog, validateChatModelCatalog } from './chat-models.mjs';
+import { estimateTokenCostNanos } from './usage-cost.mjs';
 
 export class AppError extends Error {
   constructor(message, status = 400, code = 'invalid_request') {
@@ -98,6 +99,31 @@ function migrateStandaloneThreads(db) {
     if(transactionOpen)db.exec('ROLLBACK');
     throw error;
   } finally { db.exec('PRAGMA foreign_keys=ON'); }
+}
+
+function migrateUsageEstimates(db) {
+  const hasCostColumn = () => db.prepare('PRAGMA table_info(request_usage)').all()
+    .some(column => column.name === 'estimated_cost_nanos');
+  if (hasCostColumn()) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (!hasCostColumn()) {
+      db.exec('ALTER TABLE request_usage ADD COLUMN estimated_cost_nanos INTEGER');
+      // Historical responses only retained input/output totals. Estimate them once
+      // with the public uncached rate and preserve the original usage records.
+      const rows = db.prepare(`SELECT id, model, input_tokens AS inputTokens, output_tokens AS outputTokens
+        FROM request_usage WHERE status='completed' AND total_tokens=input_tokens+output_tokens`).all();
+      const save = db.prepare('UPDATE request_usage SET estimated_cost_nanos=? WHERE id=?');
+      for (const row of rows) {
+        const cost = estimateTokenCostNanos(row.model, row);
+        if (cost !== null) save.run(cost, row.id);
+      }
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 export function createStore(dbPath,{credentialsKey}={}) {
@@ -199,7 +225,8 @@ export function createStore(dbPath,{credentialsKey}={}) {
       credential_id TEXT, key_last4 TEXT, model TEXT NOT NULL,
       input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER,
       status TEXT NOT NULL CHECK(status IN ('pending','completed','unknown','failed')),
-      source TEXT NOT NULL DEFAULT 'current', created_at TEXT NOT NULL, settled_at TEXT
+      source TEXT NOT NULL DEFAULT 'current', created_at TEXT NOT NULL, settled_at TEXT,
+      estimated_cost_nanos INTEGER
     );
     CREATE INDEX IF NOT EXISTS request_usage_user ON request_usage(user_id,created_at);
     CREATE INDEX IF NOT EXISTS request_usage_run ON request_usage(run_id);
@@ -223,6 +250,7 @@ export function createStore(dbPath,{credentialsKey}={}) {
   `);
   try {
     migrateStandaloneThreads(db);
+    migrateUsageEstimates(db);
     db.exec(`CREATE INDEX IF NOT EXISTS threads_owner_scope ON threads(user_id,project_id,updated_at);
       CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_thread ON runs(thread_id) WHERE status='running';
       CREATE TABLE IF NOT EXISTS kibot_threads (
@@ -516,9 +544,21 @@ export function createStore(dbPath,{credentialsKey}={}) {
           input=integer(value.inputTokens,'输入用量');output=integer(value.outputTokens,'输出用量');total=integer(value.totalTokens,'总用量');
           if(total!==input+output)throw new AppError('模型返回的用量不一致');
         }
-        db.prepare('UPDATE request_usage SET input_tokens=?,output_tokens=?,total_tokens=?,status=?,settled_at=? WHERE id=?').run(input,output,total,status,now(),usageId);
+        const estimate = value.estimatedCostNanos;
+        const cost = status === 'completed' && Number.isSafeInteger(estimate) && estimate >= 0 ? estimate : null;
+        db.prepare(`UPDATE request_usage SET input_tokens=?,output_tokens=?,total_tokens=?,status=?,settled_at=?,
+          estimated_cost_nanos=? WHERE id=?`).run(input, output, total, status, now(), cost, usageId);
         return {settled:true,status,inputTokens:input,outputTokens:output,totalTokens:total};
       });
+    },
+    getUsageEstimate(userId) {
+      const { cost, priced, unpricedRequests, pendingRequests } = db.prepare(`SELECT
+        total(estimated_cost_nanos) AS cost, count(estimated_cost_nanos) AS priced,
+        count(CASE WHEN estimated_cost_nanos IS NULL AND status IN ('completed','unknown') THEN 1 END) AS unpricedRequests,
+        count(CASE WHEN status='pending' THEN 1 END) AS pendingRequests
+        FROM request_usage WHERE user_id=?`).get(userId);
+      const usd = priced === 0 && (unpricedRequests > 0 || pendingRequests > 0) ? null : cost / 1_000_000_000;
+      return { usd, unpricedRequests, pendingRequests };
     },
     getUsage({userId=null,limit=100,offset=0}={}) {
       const filter=userId?' WHERE u.user_id=?':'';const params=userId?[userId]:[];

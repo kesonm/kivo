@@ -40,7 +40,11 @@
 .nav-profile .sidebar-avatar { background: #fff; color: #666; border: 1px solid var(--kibot-border); }
 .nav-profile strong { display: block; font-size: 13px; font-weight: 550; }
 .nav-profile small { display: block; font-size: 11px; color: var(--muted); margin-top: 3px; }
-.nav-profile > .icon:last-child { margin-left: auto; }
+.nav-profile-name { flex: 1; min-width: 0; }
+.nav-profile-name strong, .nav-profile-cost strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-profile-cost { min-width: 0; max-width: 46%; text-align: right; font-variant-numeric: tabular-nums; }
+.nav-profile-cost small { white-space: nowrap; }
+.nav-profile > .icon:last-child { flex-shrink: 0; }
 .kibot-mobile-topbar, .kibot-nav-brand > .icon-button { display: none; }
 .nav-empty { color: var(--muted); font-size: 12px; line-height: 1.8; padding: 16px 13px; }
 
