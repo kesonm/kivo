@@ -47,9 +47,10 @@ export function createRunContext(store) {
             if (!message) return { kind: 'unavailable' };
             const previous = db.prepare('SELECT run_id FROM run_reply_links WHERE message_id=?').get(source.id);
             const snapshot = previous && db.prepare('SELECT execution FROM run_context_snapshots WHERE run_id=?').get(previous.run_id);
+            const execution = snapshot && JSON.parse(snapshot.execution);
             return { ...source, conversationId: message.thread_id, title: message.title, createdAt: message.created_at,
               excerpt: message.content.slice(0, 1200), truncated: message.content.length > 1200,
-              sourceRunId: previous?.run_id, sessionId: snapshot ? JSON.parse(snapshot.execution).sessionId : null };
+              sourceRunId: previous?.run_id, sessionId: execution?.sessionId ?? (execution?.engine === 'codex' ? execution.threadId : null) };
           }
           if (source.kind === 'artifact') {
             const context = store.work.getTaskContext(userId, source.sourceTaskId);

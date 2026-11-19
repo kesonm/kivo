@@ -6,7 +6,8 @@ import { validateChatImageInputs } from './chat-image-references.mjs';
 
 export const CHAT_MAX_MESSAGES = 200;
 export const CHAT_MAX_BYTES = 512 * 1024;
-const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+export const CHAT_MAX_IMAGES = 4;
+export const CHAT_MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const imageExtension = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
 const toolProgress = {
   'response.web_search_call.in_progress': '正在联网搜索…',
@@ -81,7 +82,8 @@ function requestLoopback({ port, token, payload, signal }) {
   });
 }
 
-export async function streamChat({ port, token, payload, signal, chatMode, onText, onImage, onCitation, onTool, onActivity }) {
+export async function streamChat({ port, token, payload, signal, chatMode, onText, onImage, onCitation, onTool, onActivity,
+  maxImages = CHAT_MAX_IMAGES, maxImageBytes = CHAT_MAX_IMAGE_BYTES }) {
   const response = await requestLoopback({ port, token, payload, signal });
   if (response.statusCode !== 200) {
     let body = '';
@@ -147,7 +149,7 @@ export async function streamChat({ port, token, payload, signal, chatMode, onTex
       trackTool(item.type, key, status);
     }
     if (item.type === 'image_generation_call' && typeof item.result === 'string' && !seenImages.has(key)) {
-      if (seenImages.size >= 4 || item.result.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4) {
+      if (seenImages.size >= maxImages || item.result.length > Math.ceil(maxImageBytes / 3) * 4) {
         trackTool(item.type, key, 'failed');
         throw new GatewayError('生成的图片超过大小限制。', 502);
       }
@@ -158,7 +160,7 @@ export async function streamChat({ port, token, payload, signal, chatMode, onTex
         throw new GatewayError('图片服务未返回可显示的图片。', 502);
       }
       imageBytes += data.length;
-      if (imageBytes > MAX_IMAGE_BYTES) {
+      if (imageBytes > maxImageBytes) {
         trackTool(item.type, key, 'failed');
         throw new GatewayError('生成的图片超过大小限制。', 502);
       }

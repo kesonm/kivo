@@ -57,6 +57,8 @@ export function loadConfig(env=process.env){
   if(trustedProxyIps.length>32||trustedProxyIps.some(value=>!isIP(value)))throw new Error('TRUST_PROXY_IPS must contain only explicit IPv4 or IPv6 addresses separated by commas');
   const workRoutingMode=env.WORK_ROUTING_MODE??'shadow';
   if(!['off','shadow','enforce'].includes(workRoutingMode))throw new Error('WORK_ROUTING_MODE must be off, shadow or enforce');
+  const chatEngine=env.CHAT_ENGINE??'codex';
+  if(!['codex','responses'].includes(chatEngine))throw new Error('CHAT_ENGINE must be codex or responses');
   let workModelBudgets;
   try { workModelBudgets=JSON.parse(env.WORK_MODEL_BUDGETS??'{}'); } catch { throw new Error('WORK_MODEL_BUDGETS must be a JSON object'); }
   if(!workModelBudgets||typeof workModelBudgets!=='object'||Array.isArray(workModelBudgets))throw new Error('WORK_MODEL_BUDGETS must be a JSON object');
@@ -69,7 +71,7 @@ export function loadConfig(env=process.env){
     maxOutputTokens,maxConcurrentRuns:int('MAX_CONCURRENT_RUNS',2,1,16),
     autoThreadTitles:env.AUTO_THREAD_TITLES!=='false',
     runTimeoutMs:int('RUN_TIMEOUT_MS',600000,1000,3600000),
-    workRoutingMode,workModelBudgets,workContextBytes:int('WORK_CONTEXT_BYTES',393216,8192,500000),
+    chatEngine,workRoutingMode,workModelBudgets,workContextBytes:int('WORK_CONTEXT_BYTES',393216,8192,500000),
     publicOrigin:env.PUBLIC_ORIGIN??'',cookieSecure:env.COOKIE_SECURE!=='false',trustProxy:trustedProxyIps.length?trustedProxyIps:false,
     adminUsername:env.ADMIN_USERNAME??'admin',adminPassword:env.ADMIN_PASSWORD??'',adminPasswordFile:env.ADMIN_PASSWORD_FILE??'',
     distDir:path.resolve(fileURLToPath(new URL('../dist',import.meta.url))),
@@ -111,6 +113,7 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     const snapshot=supervisor.snapshot(userId);
     return {
       messages:primaryMemory.context({userId,messageId,taskSnapshot:snapshot}),
+      memoryRevision:primaryMemory.revision(userId),
       instructions:[
         'You are kibot, this user\'s persistent main assistant. Discuss ideas directly; for authorized execution, delegate work into a separate task using the provided kivo tools. The primary conversation itself has no project filesystem.',
         'First list work when an execution target or existing task is uncertain. Never guess a project ID, silently choose the most recent project, or treat analysis-only requests as authorization to execute. Ask a concise question only for missing information or authorization; do not ask again for work the user already authorized.',
@@ -749,7 +752,7 @@ export async function startServer(config=loadConfig()){
   const app=createApp({store,runtime,config,local,voice});
   store.work.reconcile();
   if(config.workRoutingMode==='enforce')app.locals.supervisor.start();
-  const server=app.listen(config.port,config.host,()=>console.log(JSON.stringify({event:'listening',port:config.port,model:config.model,userProvidedKeys:true})));
+  const server=app.listen(config.port,config.host,()=>console.log(JSON.stringify({event:'listening',port:config.port,model:config.model,chatEngine:config.chatEngine,userProvidedKeys:true})));
   server.requestTimeout=120000;server.headersTimeout=15000;
   let closing=false;
   const close=async()=>{if(closing)return;closing=true;server.close();await app.locals.supervisor.close();await Promise.allSettled([runtime.close(),voice.close()]);store.close();};
