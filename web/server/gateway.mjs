@@ -6,6 +6,7 @@ import { estimateTokenCostNanos } from './usage-cost.mjs';
 
 const OPENAI_ORIGIN = 'https://api.openai.com/v1';
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
+const NATIVE_CHAT_MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 24 * 1024 * 1024;
 export const CHAT_GATEWAY_MAX_REQUEST_BYTES = 20 * 1024 * 1024;
 export const CHAT_GATEWAY_MAX_EVENT_BYTES = 20 * 1024 * 1024;
@@ -141,17 +142,41 @@ function prepareRunnerPayload(body) {
   return payload;
 }
 
-export function prepareResponseRequest(body, config, chatTools, applicationTools = new Map()) {
+function prepareCodexChatPayload(body, applicationTools) {
+  const payload = prepareRunnerPayload(body);
+  const allowed = tools => tools.filter(tool => tool.type === 'function' && applicationTools.has(tool.name))
+    .map(tool => applicationTools.get(tool.name));
+  payload.tools = allowed(payload.tools ?? []);
+  payload.tool_choice = 'auto';
+  payload.parallel_tool_calls = false;
+  if (Array.isArray(payload.input)) {
+    payload.input = payload.input.flatMap(item => {
+      if (item.type === 'additional_tools') {
+        const tools = allowed(item.tools);
+        return tools.length ? [{ ...item, tools }] : [];
+      }
+      if (item.type === 'custom_tool_call' || item.type === 'custom_tool_call_output'
+        || (item.type === 'function_call' && !applicationTools.has(item.name))) {
+        throw new GatewayError('聊天记录包含未授权的执行工具。');
+      }
+      return [item];
+    });
+  }
+  return payload;
+}
+
+export function prepareResponseRequest(body, config, chatTools, applicationTools = new Map(), nativeChat = false) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new GatewayError('无效模型请求。');
   if (body.previous_response_id || body.conversation || body.background) throw new GatewayError('不支持跨请求的供应商会话引用。');
   if (body.input == null || (typeof body.input !== 'string' && !Array.isArray(body.input))) throw new GatewayError('缺少模型输入。');
-  const payload = chatTools ? prepareChatPayload(body, chatTools, applicationTools) : prepareRunnerPayload(body);
+  const payload = nativeChat ? prepareCodexChatPayload(body, applicationTools)
+    : chatTools ? prepareChatPayload(body, chatTools, applicationTools) : prepareRunnerPayload(body);
   payload.model = config.model;
   payload.store = false;
   payload.stream = true;
   payload.truncation = 'disabled';
   // Encrypted reasoning is returned by the provider and replayed with the isolated thread.
-  if (!chatTools || applicationTools.size) payload.include = ['reasoning.encrypted_content'];
+  if (nativeChat || !chatTools || applicationTools.size) payload.include = ['reasoning.encrypted_content'];
   const configuredMax = Number.isSafeInteger(config.maxOutputTokens) && config.maxOutputTokens > 0 ? config.maxOutputTokens : undefined;
   const requestedMax = Number.isSafeInteger(body.max_output_tokens) && body.max_output_tokens > 0 ? body.max_output_tokens : undefined;
   const maxOutputTokens = configuredMax === undefined ? requestedMax
@@ -285,7 +310,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
   const activeRequests = new Set();
   let server, listening;
 
-  function authorizeRun({ id, userId, chatTools, chatFiles = [], chatModel, reasoningEffort, chatMode, applicationTools = [] }) {
+  function authorizeRun({ id, userId, chatTools, chatFiles = [], chatModel, reasoningEffort, chatMode, applicationTools = [], nativeChat = false }) {
     if (chatTools !== undefined && (!Array.isArray(chatTools) || chatTools.some(type => !CHAT_TOOLS.has(type)))) {
       throw new GatewayError('无效的聊天工具权限。');
     }
@@ -295,6 +320,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       || new Set(applicationTools.map(tool => tool.name)).size !== applicationTools.length
       || Buffer.byteLength(JSON.stringify(applicationTools)) > 65536) throw new GatewayError('无效的主助手工具权限。');
     if (applicationTools.length && (!chatTools || files.length || chatMode === 'ultra')) throw new GatewayError('此模式不支持主助手任务工具。');
+    if (nativeChat && (!chatTools || chatTools.length || files.length || chatMode === 'ultra')) throw new GatewayError('无效的 Codex 聊天权限。');
     if (files.length && !chatTools?.includes('code_interpreter')) throw new GatewayError('未启用文件分析工具。');
     if (!chatTools && (chatModel !== undefined || reasoningEffort !== undefined || chatMode !== undefined)) throw new GatewayError('该聊天配置不可用于项目任务。');
     if (chatMode === 'ultra' && chatTools.length) throw new GatewayError('Ultra 当前仅支持普通文字聊天。');
@@ -302,7 +328,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       ? resolveChatSelection(store.getChatModelCatalog(config.model), chatModel, reasoningEffort, chatMode)
       : { model: config.model };
     const token = randomBytes(32).toString('base64url');
-    capabilities.set(token, { runId: id, userId, ...selection, applicationTools: new Map(applicationTools.map(tool => [tool.name, structuredClone(tool)])), chatTools: chatTools && new Set(chatTools), chatFiles: files, expires: Date.now() + (config.runTimeoutMs || 20 * 60_000) + 60_000, inFlight: false, requestCount: 0, controllers: new Set(), tasks: new Set() });
+    capabilities.set(token, { runId: id, userId, ...selection, nativeChat, applicationTools: new Map(applicationTools.map(tool => [tool.name, structuredClone(tool)])), chatTools: chatTools && new Set(chatTools), chatFiles: files, expires: Date.now() + (config.runTimeoutMs || 20 * 60_000) + 60_000, inFlight: false, requestCount: 0, controllers: new Set(), tasks: new Set() });
     return token;
   }
 
@@ -365,7 +391,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       const rawToken = /^Bearer ([A-Za-z0-9_-]{40,60})$/.exec(req.headers.authorization || '')?.[1];
       cap = rawToken && capabilities.get(rawToken);
       if (!cap || cap.expires < Date.now()) throw new GatewayError('工作任务凭据已失效。', 401);
-      if (cap.chatTools && (external || !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress))) {
+      if (cap.chatTools && (external || (!cap.nativeChat && !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress)))) {
         throw new GatewayError('此凭据仅供站内聊天使用。', 403);
       }
       const user = store.getUser(cap.userId);
@@ -374,13 +400,14 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
       if (req.method !== 'POST' || req.url !== '/v1/responses') throw new GatewayError('不支持的模型接口。', 404);
       if (req.headers.origin) throw new GatewayError('模型网关不接受浏览器请求。', 403);
       if (cap.inFlight) throw new GatewayError('同一任务已有模型请求在运行。', 429);
-      if (++cap.requestCount > (cap.applicationTools.size ? 8 : cap.chatTools ? 1 : 80)) throw new GatewayError('单任务模型调用次数已达限制，请继续新的任务。', 429);
+      if (++cap.requestCount > (cap.nativeChat ? 24 : cap.applicationTools.size ? 8 : cap.chatTools ? 1 : 80)) throw new GatewayError('单任务模型调用次数已达限制，请继续新的任务。', 429);
       cap.inFlight = true; ownsLock = true;
-      const body = await readJson(req, cap.chatTools ? CHAT_GATEWAY_MAX_REQUEST_BYTES : MAX_REQUEST_BYTES);
-      const payload = prepareResponseRequest(body, config, cap.chatTools, cap.applicationTools);
+      const body = await readJson(req, cap.nativeChat ? NATIVE_CHAT_MAX_REQUEST_BYTES : cap.chatTools ? CHAT_GATEWAY_MAX_REQUEST_BYTES : MAX_REQUEST_BYTES);
+      const payload = prepareResponseRequest(body, config, cap.chatTools, cap.applicationTools, cap.nativeChat);
       payload.model = cap.model;
       if (cap.chatTools) {
-        if (cap.reasoningEffort !== undefined) payload.reasoning = { effort: cap.reasoningEffort };
+        if (cap.reasoningEffort !== undefined) payload.reasoning = { ...(cap.nativeChat ? payload.reasoning : {}), effort: cap.reasoningEffort };
+        else if (cap.nativeChat) delete payload.reasoning;
         payload.safety_identifier = createHash('sha256').update(`kivo-user:${cap.userId}`).digest('hex');
       }
       if (cap.chatMode === 'ultra') {
@@ -445,6 +472,13 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
             if (usage) {
               settle(usage, 'completed');
               onStatus(cap.runId, `本次模型调用使用 ${usage.totalTokens.toLocaleString('en-US')} token。`);
+            }
+          }
+          if (cap.nativeChat) {
+            const items = event.item ? [event.item] : (Array.isArray(event.response?.output) ? event.response.output : []);
+            if (items.some(item => item?.type === 'custom_tool_call'
+              || (item?.type === 'function_call' && !cap.applicationTools.has(item.name)))) {
+              throw new GatewayError('模型请求了聊天中未启用的执行工具。', 502);
             }
           }
           // Provider error bodies can contain credential fragments or internal
