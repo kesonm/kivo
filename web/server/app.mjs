@@ -263,6 +263,7 @@ export function createApp({store,runtime,config,local=null,voice=createVoiceServ
     const session=req.session??setSession(res);
     const catalog=store.getChatModelCatalog(config.model);
     res.json({user:publicUser(req.user),csrfToken:session.csrfToken,providerConfigured:req.user?runtime.providerConfigured(req.user.id):false,
+      usageEstimate:req.user?store.getUsageEstimate(req.user.id):null,
       model:config.model,defaultChatModel:catalog.defaultModel,chatModels:chatModelOptions(catalog)});
   });
   app.get('/api/config',(req,res)=>res.json({registrationEnabled:true,providerConfigured:req.user?runtime.providerConfigured(req.user.id):false,model:config.model}));

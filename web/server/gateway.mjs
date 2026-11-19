@@ -2,6 +2,7 @@ import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { resolveChatSelection } from './chat-models.mjs';
+import { estimateTokenCostNanos } from './usage-cost.mjs';
 
 const OPENAI_ORIGIN = 'https://api.openai.com/v1';
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -186,6 +187,15 @@ export function parseUsage(usage) {
   if (!usage || !['input_tokens', 'output_tokens', 'total_tokens'].every(k => Number.isSafeInteger(usage[k]) && usage[k] >= 0)) return null;
   if (usage.total_tokens !== usage.input_tokens + usage.output_tokens) return null;
   return { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, totalTokens: usage.total_tokens };
+}
+
+export function parseResponseUsage(response, requestedModel) {
+  const usage = parseUsage(response?.usage);
+  if (!usage) return null;
+  const estimatedCostNanos = estimateTokenCostNanos(
+    response.model ?? requestedModel, usage, response.usage.input_tokens_details, response.service_tier,
+  );
+  return { ...usage, estimatedCostNanos };
 }
 
 const NETWORK_CODES = new Map([
@@ -431,7 +441,7 @@ export function createGateway({ store, config, onStatus = () => {}, fetchImpl = 
         const parser = makeSseParser(event => {
           if (['response.completed', 'response.incomplete', 'response.failed'].includes(event.type)) {
             terminal = true;
-            const usage = parseUsage(event.response?.usage);
+            const usage = parseResponseUsage(event.response, cap.model);
             if (usage) {
               settle(usage, 'completed');
               onStatus(cap.runId, `本次模型调用使用 ${usage.totalTokens.toLocaleString('en-US')} token。`);

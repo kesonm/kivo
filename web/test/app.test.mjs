@@ -99,6 +99,33 @@ test('active runs block personal key replacement and deletion',async t=>{
   store.updateRun(run.id,{status:'completed'});assert.equal((await c.request('PUT','/api/account/api-key',{apiKey:keyB})).data.last4,'BBBB');
 });
 
+test('the session returns only the signed-in user’s cumulative USD estimate', async t => {
+  const { client, store } = await fixture(t);
+  const alice = await client();
+  const bob = await client();
+  const anonymous = await client();
+  const user = await register(alice, 'alice');
+  await register(bob, 'bobby');
+  store.setUserApiKey(user.id, keyA);
+  const thread = store.createThread(null, user.id);
+  const run = store.createRun(thread.id, user.id);
+  const settled = store.beginUsage(user.id, run.id, { model: 'gpt-6.1-sol' });
+  store.settleUsage(settled, {
+    status: 'completed', inputTokens: 1000, outputTokens: 100, totalTokens: 1100, estimatedCostNanos: 3_000_000,
+  });
+  const unpriced = store.beginUsage(user.id, run.id, { model: 'unknown' });
+  store.settleUsage(unpriced, { status: 'unknown' });
+  store.beginUsage(user.id, run.id, { model: 'gpt-6.1-sol' });
+
+  assert.deepEqual((await alice.request('GET', '/api/session')).data.usageEstimate, {
+    usd: 0.003, unpricedRequests: 1, pendingRequests: 1,
+  });
+  assert.deepEqual((await bob.request('GET', '/api/session')).data.usageEstimate, {
+    usd: 0, unpricedRequests: 0, pendingRequests: 0,
+  });
+  assert.equal((await anonymous.request('GET', '/api/session')).data.usageEstimate, null);
+});
+
 test('every project, thread and run read/write stays scoped to its owner',async t=>{
   const {client,store}=await fixture(t);const alice=await client(),bob=await client();const user=await register(alice,'alice');await register(bob,'bob');const {project,thread}=await projectThread(alice),run=store.createRun(thread.id,user.id);
   for(const [method,url,body]of [

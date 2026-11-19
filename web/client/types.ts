@@ -49,7 +49,8 @@ export interface RunEvent {
   exitCode?: number | null;
   itemId?: string;
 }
-export interface Session { user: User | null; csrfToken: string; providerConfigured: boolean; model?: string; defaultChatModel?: string; chatModels?: ChatModelOption[] }
+export interface UsageEstimate { usd: number | null; unpricedRequests: number; pendingRequests: number }
+export interface Session { user: User | null; csrfToken: string; providerConfigured: boolean; usageEstimate?: UsageEstimate | null; model?: string; defaultChatModel?: string; chatModels?: ChatModelOption[] }
 export interface ApiKeyStatus { configured: boolean; last4: string | null; updatedAt: string | null }
 export interface Usage { id: string; model: string; inputTokens: number | null; outputTokens: number | null; totalTokens: number | null; status: string; source?: string; createdAt: string; userId?: string; username?: string; displayName?: string; threadId?: string; runId?: string; keyLast4?: string | null }
 export interface UsagePage { usage: Usage[]; total: number; limit: number; offset: number; totals?: { inputTokens: number; outputTokens: number; totalTokens: number; unknownRequests: number; totalRequests: number } }

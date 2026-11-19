@@ -4,6 +4,7 @@ import { Auth } from './Auth';
 import { Account } from './Account';
 import { Admin } from './Admin';
 import { Workspace } from './Workspace';
+import { formatEstimatedSpend } from './Usage';
 import { LocalDevices, LocalProjectDialog } from './Local';
 import { Brand, Icon } from './icons';
 import { getDirtyFile } from './navigation';
@@ -389,7 +390,17 @@ export function App() {
           {allTasks.length > 0 && <button className="nav-action nav-more" onClick={() => openNavigation('tasks')}>查看全部任务<Icon name="arrow" size={15} /></button>}
           {recentThreads.length > 8 && <button className="nav-action nav-more" onClick={() => openNavigation('history')}>查看历史对话<Icon name="arrow" size={15} /></button>}
         </div>
-        <div className="nav-bottom"><button className="nav-profile" onClick={() => openNavigation('account')} aria-label="个人设置"><span className="sidebar-avatar">{(user.displayName || user.username).slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName || user.username}</strong><small>个人设置</small></span><Icon name="settings" size={18} /></button></div>
+        <div className="nav-bottom">
+          <button className="nav-profile" onClick={() => openNavigation('account')} aria-label="个人设置" aria-describedby="nav-usage-estimate">
+            <span className="sidebar-avatar">{(user.displayName || user.username).slice(0, 1).toUpperCase()}</span>
+            <span className="nav-profile-name"><strong>{user.displayName || user.username}</strong><small>个人设置</small></span>
+            <span className="nav-profile-cost" id="nav-usage-estimate" title="本站累计模型费用估算。可在账户设置查看统计范围。">
+              <strong>{formatEstimatedSpend(session?.usageEstimate?.usd)}</strong>
+              <small>消耗估算</small>
+            </span>
+            <Icon name="settings" size={18} />
+          </button>
+        </div>
         {docked && <div className="nav-resize-handle" {...sidebarLayout.separatorProps}><span className="nav-resize-hint" aria-hidden="true">{sidebarLayout.collapseReady ? '松开收起侧栏' : '拖动调整宽度'}</span></div>}
       </aside>
       <div className="main-shell" inert={drawerOpen || undefined}>
@@ -401,7 +412,7 @@ export function App() {
             onThreadCreated={onThreadCreated} onThreadsChanged={onThreadsChanged} user={user} providerConfigured={!!session?.providerConfigured} model={session?.model} defaultChatModel={session?.defaultChatModel} chatModels={session?.chatModels} refreshSession={refreshSession}
             onRenameProject={() => void renameProject()} onDeleteProject={() => void deleteProject()} onOpenAccount={() => void navigate('account')}
             onOpenLocal={async () => { if (await confirmNavigation()) setLocalDialog('open'); }} />
-          : view === 'local' ? <LocalDevices /> : view === 'admin' && user.role === 'admin' ? <Admin currentUser={user} onModelsSaved={() => void refreshSession(user.id).catch(() => undefined)} /> : <Account user={user} refreshSession={refreshSession} />}
+          : view === 'local' ? <LocalDevices /> : view === 'admin' && user.role === 'admin' ? <Admin currentUser={user} onModelsSaved={() => void refreshSession(user.id).catch(() => undefined)} /> : <Account user={user} usageEstimate={session?.usageEstimate} refreshSession={refreshSession} />}
       </div>
       {!sidebarVisible && <div className="nav-floating-account"><button type="button" className="nav-floating-avatar" aria-label="个人设置" aria-describedby="nav-account-tooltip" onClick={() => openNavigation('account')}><span className="sidebar-avatar">{(user.displayName || user.username).slice(0, 1).toUpperCase()}</span></button><span id="nav-account-tooltip" role="tooltip">{user.displayName || user.username}</span></div>}
     </div>

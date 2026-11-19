@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createGateway, prepareResponseRequest, makeSseParser, parseUsage } from '../server/gateway.mjs';
+import { createGateway, prepareResponseRequest, makeSseParser, parseUsage, parseResponseUsage } from '../server/gateway.mjs';
 import { defaultChatModelCatalog } from '../server/chat-models.mjs';
 
 // A deliberately configured legacy key must never be used as a fallback.
@@ -69,22 +69,42 @@ test('primary gateway bounds repeated calls and allows owned function history wi
   assert.equal(f.store.usage.length, 8);
 });
 
-test('usage uses actual provider total with a single direct inference request', async t => {
+test('one inference request records actual tokens and estimates cost using cache and output details', async t => {
   const calls = [];
   const f = await fixture(t, async (url, options) => {
     calls.push({ url, options, body: JSON.parse(options.body) });
-    return stream([{ ...completed(), response: { usage: { input_tokens: 100, input_tokens_details: { cached_tokens: 80 }, output_tokens: 20, output_tokens_details: { reasoning_tokens: 10 }, total_tokens: 120 } } }]);
-  });
+    return stream([{ type: 'response.completed', response: {
+      model: 'gpt-6.1-sol', service_tier: 'default',
+      usage: {
+        input_tokens: 100, output_tokens: 20, total_tokens: 120,
+        input_tokens_details: {
+          cached_tokens: 80, cache_write_tokens: 10,
+          cache_write_tokens_details: { ttl_30m_tokens: 6, ttl_12h_tokens: 4 },
+        },
+        output_tokens_details: { reasoning_tokens: 10 },
+      },
+    } }]);
+  }, { configOverrides: { model: 'gpt-6.1-sol' } });
   const response = await f.request({ input: 'Hello', model: 'forbidden-model' });
   assert.equal(response.status, 200); await response.text();
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, 'https://api.openai.com/v1/responses');
-  assert.equal(calls[0].body.model, 'test-model');
+  assert.equal(calls[0].body.model, 'gpt-6.1-sol');
   assert.equal(calls[0].body.max_output_tokens, 512);
   assert.equal(calls[0].options.headers.authorization, 'Bearer sk-test-user-u-0001');
   assert.equal(f.store.usage[0].totalTokens, 120);
+  assert.equal(f.store.usage[0].estimatedCostNanos, 263_000);
   assert.equal(f.store.usage[0].keyLast4, '0001');
   assert.equal(f.store.usage[0].status, 'completed');
+});
+
+test('estimates price the whole long-context request and preserve usage when the price is unknown', () => {
+  const response = { model: 'gpt-6.2-astra', usage: { input_tokens: 300_000, output_tokens: 100, total_tokens: 300_100 } };
+  assert.equal(parseResponseUsage(response).estimatedCostNanos, 4_806_000_000);
+  assert.equal(parseResponseUsage({ ...response, service_tier: 'flex' }).estimatedCostNanos, null);
+  assert.deepEqual(parseResponseUsage({ ...response, model: 'gpt-unpriced' }, 'gpt-6.1-sol'), {
+    inputTokens: 300_000, outputTokens: 100, totalTokens: 300_100, estimatedCostNanos: null,
+  });
 });
 
 test('chat and runner requests omit an unconfigured output limit from the upstream payload', async t => {
